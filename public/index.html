@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-title" content="Metadata">
+<meta name="description" content="Edit MP3, WAV, M4A and MP4 metadata on-device. Nothing is uploaded.">
+<title>Metadata Editor</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="/app.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<header class="top">
+  <h1>Metadata Editor</h1>
+  <label class="btn primary picker">Choose file<input id="file" type="file" accept=".mp3,.wav,.m4a,.mp4,audio/*,video/mp4"></label>
+  <p class="hint">MP3 · WAV · M4A · MP4. Files are read and written on this device only.</p>
+</header>
+<p id="error" class="error" role="alert" hidden></p>
+<main id="main" hidden>
+  <section id="summary" class="card"></section>
+  <section id="c2pa" class="card c2pa" hidden></section>
+  <section id="edit" class="group"></section>
+  <section id="preserve" class="group"></section>
+  <section id="protected" class="group"></section>
+  <section id="technical" class="group"></section>
+</main>
+<footer id="bar" class="bar" hidden>
+  <div class="bar-row">
+    <span id="dot" class="dot" aria-hidden="true"></span>
+    <span id="status" class="status" aria-live="polite"></span>
+    <button id="revertAll" class="btn small" type="button">Revert all</button>
+  </div>
+  <div class="bar-row">
+    <input id="filename" class="filename" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="Output file name">
+    <button id="save" class="btn primary" type="button">Save</button>
+  </div>
+  <button id="shareAgain" class="btn wide" type="button" hidden>Share file</button>
+</footer>
+</body>
+</html>
