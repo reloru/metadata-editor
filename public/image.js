@@ -48,7 +48,10 @@ export function xmpInfo(text) {
   };
   for (const m of text.matchAll(/\s([A-Za-z][\w.-]*:[\w.-]+)="([^"]*)"/g)) push(m[1], m[2]);
   for (const m of text.matchAll(/<([A-Za-z][\w.-]*:[\w.-]+)>([^<]+)<\/\1>/g)) push(m[1], m[2]);
-  for (const m of text.matchAll(/<([A-Za-z][\w.-]*:[\w.-]+)>\s*<rdf:(?:Alt|Seq|Bag)>\s*<rdf:li[^>]*>([^<]*)<\/rdf:li>/g)) push(m[1], m[2]);
+  for (const m of text.matchAll(/<([A-Za-z][\w.-]*:[\w.-]+)>\s*<rdf:(Alt|Seq|Bag)>([\s\S]*?)<\/rdf:\2>/g)) {
+    const items = [...m[3].matchAll(/<rdf:li[^>]*>([^<]*)<\/rdf:li>/g)].map((x) => x[1]);
+    if (items.length) push(m[1], m[2] === 'Alt' ? items[0] : items.join(', '));
+  }
   return { rows, hasGps: /exif:GPS(Latitude|Longitude)|Iptc4xmpExt:LocationCreated|photoshop:City/.test(text) };
 }
 

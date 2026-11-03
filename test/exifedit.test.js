@@ -147,3 +147,13 @@ test('Photo info: reverting the caption restores everything; clearing it removes
   assert.equal(re2.fields.find((f) => f.key === 'ImageDescription'), undefined);
   assert.equal(re2.fields.find((f) => f.key === 'dc:description'), undefined);
 });
+
+test('XMP details list every keyword; an impossible Date taken is flagged', async () => {
+  const { xmpInfo } = await import('../public/image.js');
+  assert.deepEqual(xmpInfo('<d><dc:subject><rdf:Bag><rdf:li>A</rdf:li><rdf:li>B &amp; C</rdf:li></rdf:Bag></dc:subject></d>').rows, [['dc:subject', 'A, B & C']]);
+  const doc = await open(appleJpeg());
+  find(doc, 'taken').value = '0000-00-00 00:00:00 +10:30';
+  const re = await open(await save(doc));
+  assert.match(find(re, 'taken').note, /not a real calendar date/);
+  assert.doesNotMatch(find(doc, 'caption').note, /calendar/);
+});
