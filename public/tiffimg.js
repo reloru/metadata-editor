@@ -51,7 +51,7 @@ export async function load(file) {
   }
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'data', label: dng ? 'Raw image data and previews' : 'Image data', deletable: false, display: formatBytes(file.size) }));
   doc.fields = fields;
-  doc.notes.push(`${doc.format} files are view-only except for removing the EXIF location.`);
+  doc.notes.push(doc.gpsField ? `${doc.format} files are view-only except for removing the EXIF location.` : `${doc.format} files are view-only. This file has no EXIF location.`);
   const w = t.ifd0.entries.get(0x100);
   const h = t.ifd0.entries.get(0x101);
   doc.technical.push(['Container', `${doc.format} (${t.le ? 'little' : 'big'}-endian)`]);

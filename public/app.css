@@ -184,9 +184,9 @@ input:disabled, textarea:disabled { opacity: 0.6; }
   flex: none;
 }
 
-.tech { display: grid; grid-template-columns: minmax(90px, max-content) 1fr; gap: 6px 12px; margin: 0; font-size: 0.92rem; }
-.tech dt { color: var(--muted); }
-.tech dd { margin: 0; }
+.tech { display: grid; grid-template-columns: minmax(90px, max-content) minmax(0, 1fr); gap: 6px 12px; margin: 0; font-size: 0.92rem; }
+.tech dt { color: var(--muted); max-width: 45vw; overflow-wrap: anywhere; }
+.tech dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
 .bar {
   position: sticky;

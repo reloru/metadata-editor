@@ -205,7 +205,7 @@ export async function load(file) {
     doc.c2pa.noRemove = true;
   }
   if (!doc.exif) doc.notes.push(NO_EXIF_NOTE);
-  doc.notes.push(`${doc.format} files are view-only except for removing the EXIF location.`);
+  doc.notes.push(doc.gpsField ? `${doc.format} files are view-only except for removing the EXIF location.` : `${doc.format} files are view-only. This file has no EXIF location.`);
   doc.technical.push(['Container', `${doc.format} (brand ${brand.trim()})`]);
   if (width) doc.technical.push(['Dimensions', `${width}×${height}`]);
   doc.technical.push(['Metadata', [doc.exif && 'EXIF', doc.sections.some((s) => s.title === 'XMP') && 'XMP', doc.c2pa && 'C2PA'].filter(Boolean).join(', ') || 'none']);
