@@ -436,6 +436,40 @@ function trackStats(buf, trak, handler) {
   return out;
 }
 
+// Byte ranges of every sample of a track (stsc + stsz + stco/co64), merged when contiguous.
+export function sampleRanges(buf, trak) {
+  const stbl = path(trak, 'mdia', 'minf', 'stbl');
+  const stsc = child(stbl, 'stsc');
+  const stsz = child(stbl, 'stsz');
+  const co = child(stbl, 'stco') || child(stbl, 'co64');
+  if (!stsc || !stsz || !co) throw new Error('missing sample tables');
+  const chunks = readChunkOffsets(buf, co)[0].offsets;
+  const sp = stsc.start + stsc.hdr;
+  const nsc = u32be(buf, sp + 4);
+  const runs = [];
+  for (let i = 0; i < nsc; i++) runs.push({ first: u32be(buf, sp + 8 + i * 12), per: u32be(buf, sp + 12 + i * 12) });
+  const zp = stsz.start + stsz.hdr;
+  const fixed = u32be(buf, zp + 4);
+  const count = u32be(buf, zp + 8);
+  if (!fixed && zp + 12 + count * 4 > stsz.start + stsz.size) throw new Error('stsz exceeds box');
+  const ranges = [];
+  let s = 0;
+  let bytes = 0;
+  for (let c = 0; c < chunks.length && s < count; c++) {
+    let per = 0;
+    for (const r of runs) if (r.first <= c + 1) per = r.per;
+    let off = chunks[c];
+    for (let k = 0; k < per && s < count; k++, s++) {
+      const size = fixed || u32be(buf, zp + 12 + s * 4);
+      const last = ranges[ranges.length - 1];
+      if (last && last.end === off) last.end += size; else ranges.push({ start: off, end: off + size });
+      off += size;
+      bytes += size;
+    }
+  }
+  return { ranges, count, bytes };
+}
+
 // ---- QuickTime keys/mdta metadata (moov/meta with an 'mdta' handler) ----
 
 const LOCATION_KEY = /location/i;
@@ -593,7 +627,6 @@ export async function load(file) {
   // Tracks.
   const tracks = [];
   let timedText = false;
-  let faceTrack = false;
   let hasVideo = false;
   for (const trak of moov.children.filter((c) => c.type === 'trak')) {
     const hdlr = path(trak, 'mdia', 'hdlr');
@@ -601,6 +634,7 @@ export async function load(file) {
     const stsd = path(trak, 'mdia', 'minf', 'stbl', 'stsd');
     let entry = '????';
     let detail = '';
+    let face = false;
     if (stsd && stsd.size >= stsd.hdr + 16) {
       const e = stsd.start + stsd.hdr + 8;
       entry = fourcc(buf, e + 4);
@@ -614,15 +648,14 @@ export async function load(file) {
       if (entry === 'mebx') {
         const keys = mebxKeys(buf, stsd, e);
         if (keys.length) detail = keys.map((k) => k.replace(/^com\.apple\.quicktime\./, '')).join(', ');
-        if (keys.some((k) => /detected-face/.test(k))) faceTrack = true;
+        if (keys.some((k) => /detected-face/.test(k))) face = true;
       }
     }
     if (TIMED_TEXT.has(handler)) timedText = true;
     if (handler === 'vide') hasVideo = true;
-    tracks.push({ handler, entry, detail, stats: trackStats(buf, trak, handler), name: hdlr ? handlerName(buf, hdlr) : '' });
+    tracks.push({ handler, entry, detail, face, stats: trackStats(buf, trak, handler), name: hdlr ? handlerName(buf, hdlr) : '' });
   }
   doc.format = hasVideo ? (brands && brands.major === 'qt  ' ? 'MOV' : 'MP4') : 'M4A';
-  if (faceTrack) doc.notes.push('This video has a face-detection metadata track (face positions and angles per frame). Removing it is not supported yet.');
   doc.timedText = timedText;
 
   // Metadata path.
@@ -661,6 +694,14 @@ export async function load(file) {
     if (c.type === 'mvhd') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie header (mvhd)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'trak') {
       const t = tracks[moov.children.filter((x) => x.type === 'trak').indexOf(c)];
+      if (t.face) {
+        let info = '';
+        try { const r = sampleRanges(buf, c); info = `${r.count} sample${r.count === 1 ? '' : 's'}, ${formatBytes(r.bytes)}`; } catch { info = 'sample table unreadable'; }
+        moovFields.push(makeField({ cls: 'edit', kind: 'readonly', key: 'faces', label: 'Face-detection data', node: c, deleteLabel: 'Remove face data',
+          display: `Per-frame face positions, angles and face IDs · ${info}`,
+          note: 'Removing deletes this metadata track and blanks its samples in the file. Video, audio and the other tracks are unchanged.' }));
+        continue;
+      }
       moovFields.push(makeField({ cls: 'protected', kind: 'info', key: 'trak', label: t.entry === 'mebx' ? 'Track (timed metadata)' : `Track (${t.handler})`, deletable: false, display: `${t.entry}${t.detail ? ', ' + t.detail : ''}${TIMED_TEXT.has(t.handler) ? ' — timed text, read-only' : ''}` }));
     } else if (c.type === 'mvex') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie extends (mvex)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'udta' && c.children) {
@@ -907,7 +948,19 @@ export async function build(doc, opts = {}) {
     }
     throw new Error('A chunk offset points outside the file');
   };
-  const offsets = readChunkOffsets(buf, doc.moov);
+  const removedTraks = doc.moovFields.filter((f) => f.deleted && f.node && f.node.type === 'trak').map((f) => f.node);
+  const inRemoved = (n) => { for (let p = n; p; p = p.parent) if (removedTraks.includes(p)) return true; return false; };
+  const offsets = readChunkOffsets(buf, doc.moov).filter((o) => !inRemoved(o.node));
+  // Samples of removed tracks are blanked in place so their data does not stay in the file.
+  const blank = [];
+  for (const t of removedTraks) {
+    for (const r of sampleRanges(buf, t).ranges) {
+      const box = doc.top.find((b) => b.type === 'mdat' && r.start >= b.start + b.hdr && r.end <= b.start + b.size);
+      if (!box) throw new Error('Track data lies outside the media data box; nothing saved');
+      blank.push({ box, start: r.start, end: r.end });
+    }
+  }
+  blank.sort((a, b) => a.start - b.start);
   const moved = doc.top.some((b) => b.newStart !== null && b.newStart !== b.start);
   let verify = { entries: 0, remapped: false };
   if (moved && offsets.length) {
@@ -929,13 +982,20 @@ export async function build(doc, opts = {}) {
   const parts = [];
   for (const b of doc.top) {
     if (b.newStart === null) continue;
-    if (b === doc.moovBox && moovBytes) parts.push(moovBytes);
-    else parts.push(file.slice(b.start, b.start + b.size));
+    if (b === doc.moovBox && moovBytes) { parts.push(moovBytes); continue; }
+    let at = b.start;
+    for (const z of blank) {
+      if (z.box !== b || z.start < at) continue;
+      parts.push(file.slice(at, z.start), new Uint8Array(z.end - z.start));
+      at = z.end;
+    }
+    parts.push(file.slice(at, b.start + b.size));
   }
   if (doc.trailingStart !== null && !(doc.trailingField && doc.trailingField.deleted)) parts.push(file.slice(doc.trailingStart));
   if (partsSize(parts) !== pos + (doc.trailingStart !== null && !(doc.trailingField && doc.trailingField.deleted) ? file.size - doc.trailingStart : 0)) {
     throw new Error('Internal size mismatch');
   }
+  verify.blank = blank.map((z) => [z.start, z.end]);
   doc.lastVerify = verify;
   return parts;
 }
@@ -948,8 +1008,15 @@ export async function verifyPayload(file, out, verify, maxSamples = 64) {
     const n = p.old.length;
     const step = Math.max(1, Math.floor(n / maxSamples));
     for (let i = 0; i < n; i += step) {
-      const a = await readBytes(file, p.old[i], p.old[i] + 16);
-      const b = await readBytes(out, p.now[i], p.now[i] + 16);
+      // Stop the comparison where intentionally blanked bytes (removed track samples) begin.
+      let len = 16;
+      for (const [s, e] of verify.blank || []) {
+        if (p.old[i] >= s && p.old[i] < e) { bad++; len = 0; break; }
+        if (s > p.old[i]) len = Math.min(len, s - p.old[i]);
+      }
+      if (!len) continue;
+      const a = await readBytes(file, p.old[i], p.old[i] + len);
+      const b = await readBytes(out, p.now[i], p.now[i] + len);
       if (a.length !== b.length || a.some((x, j) => x !== b[j])) bad++;
     }
   }
