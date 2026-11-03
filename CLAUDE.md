@@ -7,7 +7,7 @@ Static web app (PWA) served by a Cloudflare Worker. Reads and edits metadata in 
 - `src/worker.js` — serves `env.ASSETS`, adds CSP / nosniff / no-referrer headers.
 - `test/` — `node --test`; synthetic fixtures built in `test/fixtures.js`. No real audio is committed.
 - `tools/make-icons.js` — regenerates the PNG icons (`node tools/make-icons.js`).
-- `wrangler.jsonc`, `.github/workflows/ci.yml` (tests on PR and push to main; deploy on push to main).
+- `wrangler.jsonc`, `.github/workflows/ci.yml` (tests on PR and push to main; deploy on push to main). The deploy job stamps the short commit ID into `BUILD` in `public/editor.js`; the page shows it under the file picker.
 
 ## Hard constraints
 - All parsing and writing client-side. No uploads, no server processing, no network requests from the page. The Worker serves static assets only.
