@@ -149,3 +149,11 @@ test('MP4: fragmented files are read-only', async () => {
   assert.deepEqual(addable(doc), []);
   await assert.rejects(buildOutput(doc), /Fragmented/);
 });
+
+test('QuickTime .mov (ftyp qt) opens through the BMFF module', async () => {
+  const b = F.fixture6().slice();
+  b.set([0x71, 0x74, 0x20, 0x20], 8);
+  const doc = await open(b);
+  assert.equal(doc.format, 'MP4');
+  assert.match(Object.fromEntries(doc.technical).Brands, /^qt {2}/);
+});

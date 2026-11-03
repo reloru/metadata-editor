@@ -7,8 +7,9 @@ import { parseManifestStore, summarize, hashBinding, checkDataHash } from './c2p
 import * as mp3 from './mp3.js';
 import * as riff from './riff.js';
 import * as bmff from './bmff.js';
+import * as image from './image.js';
 
-const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4' };
+const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png' };
 
 const IMAGE_BRANDS = new Set(['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1', 'avif', 'avis']);
 
@@ -19,8 +20,6 @@ function unsupported(head) {
     if (t === 'OggS') return 'Ogg';
     if (t === 'FORM' && head.length >= 12 && /^AIF[FC]$/.test(fourcc(head, 8))) return 'AIFF';
     if (t === 'RIFF' && head.length >= 12 && fourcc(head, 8) === 'WEBP') return 'WebP image';
-    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'JPEG image';
-    if (t === '\x89PNG') return 'PNG image';
     if (t === 'GIF8') return 'GIF image';
     if (t === '%PDF') return 'PDF';
     if (t === 'PK\x03\x04') return 'ZIP-based (Office, archive)';
@@ -34,10 +33,11 @@ export async function openFile(file) {
   const other = unsupported(head);
   if (other) throw new Error(`${other} files are not supported yet.`);
   let mod;
-  if (riff.detect(head)) mod = riff;
+  if (image.detect(head)) mod = image;
+  else if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
   else if (await mp3.detect(head)) mod = mp3;
-  else throw new Error('Unrecognized file: not MP3, WAV, M4A or MP4 (detected by content, not extension).');
+  else throw new Error('Unrecognized file: not MP3, WAV, M4A, MP4/MOV, JPEG or PNG (detected by content, not extension).');
   const doc = await mod.load(file);
   if (mod === mp3 && doc.tagEnd) {
     const after = await readBytes(file, doc.tagEnd, doc.tagEnd + 4);
