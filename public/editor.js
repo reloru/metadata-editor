@@ -10,20 +10,29 @@ import * as bmff from './bmff.js';
 
 const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4' };
 
+const IMAGE_BRANDS = new Set(['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1', 'avif', 'avis']);
+
 function unsupported(head) {
   if (head.length >= 4) {
     const t = fourcc(head, 0);
     if (t === 'fLaC') return 'FLAC';
     if (t === 'OggS') return 'Ogg';
     if (t === 'FORM' && head.length >= 12 && /^AIF[FC]$/.test(fourcc(head, 8))) return 'AIFF';
+    if (t === 'RIFF' && head.length >= 12 && fourcc(head, 8) === 'WEBP') return 'WebP image';
+    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'JPEG image';
+    if (t === '\x89PNG') return 'PNG image';
+    if (t === 'GIF8') return 'GIF image';
+    if (t === '%PDF') return 'PDF';
+    if (t === 'PK\x03\x04') return 'ZIP-based (Office, archive)';
   }
+  if (head.length >= 12 && fourcc(head, 4) === 'ftyp' && IMAGE_BRANDS.has(fourcc(head, 8))) return 'HEIF/AVIF image';
   return null;
 }
 
 export async function openFile(file) {
   const head = await readBytes(file, 0, 16);
   const other = unsupported(head);
-  if (other) throw new Error(`${other} files are not supported.`);
+  if (other) throw new Error(`${other} files are not supported yet.`);
   let mod;
   if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
@@ -111,12 +120,41 @@ export async function buildOutput(doc) {
   return blob;
 }
 
+// ISO 8601 -> ms, tolerating more than 3 fractional digits ("…06.079003+00:00").
+export function parseTime(s) {
+  if (typeof s !== 'string') return NaN;
+  return Date.parse(s.trim().replace(/(\.\d{3})\d+/, '$1'));
+}
+
+// Reference times from the C2PA manifest that provenance strings can be compared with.
+function c2paTimes(doc) {
+  const s = doc.c2pa && doc.c2pa.summary;
+  if (!s) return [];
+  const out = [];
+  for (const [k, v] of s.suno) if (/^created(At)?$/.test(k)) out.push({ label: 'C2PA createdAt', t: parseTime(v) });
+  if (s.signature && s.signature.timestamp) out.push({ label: 'C2PA signing time', t: parseTime(s.signature.timestamp) });
+  return out.filter((r) => Number.isFinite(r.t));
+}
+
+// Suno provenance strings, each with how its created time relates to the C2PA times (within 5 minutes).
 export function provenance(doc) {
   const out = [];
+  const refs = c2paTimes(doc);
   for (const p of doc.mod.provenance(doc)) {
     const s = parseSuno(p.text);
-    if (s) out.push({ where: p.where, ...s });
+    if (!s) continue;
+    const t = parseTime(s.created);
+    const relations = [];
+    for (const r of refs) {
+      if (!Number.isFinite(t)) break;
+      const d = Math.round((t - r.t) / 1000);
+      if (d === 0) relations.push(`same as ${r.label}`);
+      else if (Math.abs(d) <= 300) relations.push(`${Math.abs(d)} s ${d < 0 ? 'before' : 'after'} ${r.label}`);
+    }
+    out.push({ where: p.where, ...s, relations });
   }
+  const times = new Set(out.map((p) => parseTime(p.created)).map((t) => (Number.isFinite(t) ? Math.round(t / 1000) : NaN)));
+  if (out.length > 1 && times.size > 1) out.differ = true;
   return out;
 }
 

@@ -92,7 +92,7 @@ test('WAV: existing id3 chunk edited with the ID3 module', async () => {
   const re = await open(out);
   assert.equal(re.fields.find((f) => f.group === 'ID3' && f.key === 'TIT2').value, NON_ASCII);
   assert.deepEqual(re.fields.find((f) => f.group === 'ID3' && f.key === 'APIC').value.data, F.FAKE_JPEG);
-  assert.equal(re.fields.find((f) => f.group === 'ID3' && f.key === 'TXXX').cls, 'preserve');
+  assert.deepEqual(re.fields.find((f) => f.group === 'ID3' && f.key === 'TXXX').value, { desc: 'comment', text: F.SUNO_TEXT });
   assert.deepEqual(dataChunk(out), dataChunk(before));
 });
 

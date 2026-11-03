@@ -87,6 +87,10 @@ export function parseTrack(v) {
   return { n: Number(m[1]), total: m[2] ? Number(m[2]) : 0 };
 }
 
+export function validateBool(v) {
+  return v === '' || v === '0' || v === '1' ? null : 'Use 1 (yes) or 0 (no)';
+}
+
 export function validateBpm(v) {
   if (v === '') return null;
   return /^\d+$/.test(v) ? null : 'Whole number';

@@ -57,17 +57,33 @@ export function xingHeader(b, o, h) {
   if (tag !== 'Xing' && tag !== 'Info') return null;
   const flags = u32be(b, x + 4);
   let p = x + 8;
-  const out = { tag, offset: x, frames: null, bytes: null, encoder: null };
+  const out = { tag, offset: x, frames: null, bytes: null, encoder: null, delay: null, padding: null };
   if (flags & 1) { out.frames = u32be(b, p); p += 4; }
   if (flags & 2) { out.bytes = u32be(b, p); p += 4; }
   if (flags & 4) p += 100;
   if (flags & 8) p += 4;
   if (p + 9 <= b.length) {
     const enc = decodeLatin1(b.subarray(p, p + 9));
-    if (/^[A-Za-z][\x20-\x7e]{3,8}$/.test(enc)) out.encoder = enc.trim();
+    if (/^[A-Za-z][\x20-\x7e]{3,8}$/.test(enc)) {
+      out.encoder = enc.replace(/\0+$/, '').trim();
+      // LAME-format tag: 12-bit encoder delay and padding at bytes 21-23 after the version string.
+      if (p + 24 <= b.length) {
+        out.delay = (b[p + 21] << 4) | (b[p + 22] >> 4);
+        out.padding = ((b[p + 22] & 0x0f) << 8) | b[p + 23];
+      }
+    }
   }
   return out;
 }
+
+// Fraunhofer VBRI header, 32 bytes after the frame header. Returns null if absent.
+export function vbriHeader(b, o) {
+  const x = o + 4 + 32;
+  if (x + 18 > b.length || decodeLatin1(b.subarray(x, x + 4)) !== 'VBRI') return null;
+  return { tag: 'VBRI', offset: x, delay: (b[x + 6] << 8) | b[x + 7], bytes: u32be(b, x + 10), frames: u32be(b, x + 14) };
+}
+
+const MODES = ['Stereo', 'Joint stereo', 'Dual channel', 'Mono'];
 
 function findFirstFrame(b) {
   for (let i = 0; i + 4 <= b.length; i++) {
@@ -156,13 +172,31 @@ export async function load(file) {
   if (first) {
     const fh = first.header;
     codec = `MPEG-${fh.version} Layer ${'I'.repeat(fh.layer)}`;
-    const x = xingHeader(scan, first.offset, fh);
-    if (x) {
-      if (x.frames) duration = formatDuration((x.frames * fh.samples) / fh.sampleRate);
-      doc.fields.push(makeField({ cls: 'protected', kind: 'info', key: 'Xing', label: `${x.tag} header${x.encoder ? ' + LAME' : ''}`, display: [x.frames !== null ? `${x.frames} frames` : null, x.bytes !== null ? formatBytes(x.bytes) : null, x.encoder].filter(Boolean).join(', '), deletable: false }));
+    const x = xingHeader(scan, first.offset, fh) || vbriHeader(scan, first.offset);
+    const audioBytes = end - doc.tagEnd - first.offset;
+    let seconds = null;
+    let bitrateNote;
+    if (x && x.frames) {
+      seconds = (x.frames * fh.samples) / fh.sampleRate;
+      duration = formatDuration(seconds);
+    } else if (fh.bitrate) {
+      seconds = (audioBytes * 8) / (fh.bitrate * 1000);
+      duration = `${formatDuration(seconds)} (estimated from first frame bitrate)`;
     }
-    doc.technical.push(['Codec', codec], ['Sample rate', `${fh.sampleRate} Hz`], ['Channels', String(fh.channels)]);
-    if (x && x.encoder) doc.technical.push(['Encoder (LAME header)', x.encoder]);
+    if (x) {
+      const label = x.tag === 'VBRI' ? 'VBRI header' : `${x.tag} header${x.encoder ? ' + encoder tag' : ''}`;
+      doc.fields.push(makeField({ cls: 'protected', kind: 'info', key: x.tag === 'VBRI' ? 'VBRI' : 'Xing', label, display: [x.frames !== null ? `${x.frames} frames` : null, x.bytes !== null ? formatBytes(x.bytes) : null, x.encoder].filter(Boolean).join(', '), deletable: false }));
+    }
+    let rate = 'unknown';
+    if (!x) rate = fh.bitrate ? `CBR (assumed, no Xing/VBRI header) · ${fh.bitrate} kbps` : 'Free format';
+    else if (x.tag === 'Info') rate = `CBR (Info header) · ${fh.bitrate} kbps`;
+    else rate = 'VBR';
+    if (x && x.tag !== 'Info' && seconds) rate += ` · ${Math.round(((x.bytes || audioBytes) * 8) / seconds / 1000)} kbps average`;
+    doc.technical.push(['Codec', codec], ['Bitrate', rate], ['Sample rate', `${fh.sampleRate} Hz`], ['Channels', `${fh.channels} (${MODES[fh.mode]})`]);
+    if (x && x.encoder) doc.technical.push(['Encoder (LAME-format tag)', x.encoder]);
+    if (x && x.delay !== null && (x.delay || x.padding)) {
+      doc.technical.push(['Gapless', `${x.delay} samples delay${x.padding !== null && x.padding !== undefined ? `, ${x.padding} samples padding` : ''}`]);
+    }
     doc.audioStart = doc.tagEnd + first.offset;
   } else {
     doc.notes.push('No MPEG audio frame found near the start of the audio data.');

@@ -6,6 +6,7 @@ import {
 } from './editor.js';
 import { fieldError, detectImageMime, PICTURE_TYPES } from './fields.js';
 import { formatBytes } from './bytes.js';
+import { nameString } from './der.js';
 
 const $ = (id) => document.getElementById(id);
 let doc = null;
@@ -116,8 +117,9 @@ function renderProvenance() {
   fill(box, ...list.map((p) => h('div', { class: 'prov' },
     h('div', { class: 'prov-head' }, 'Suno provenance', h('span', { class: 'chip' }, p.where)),
     h('div', { class: 'kv' }, h('span', null, 'created'), h('span', { class: 'mono' }, p.created)),
+    p.relations.length ? h('div', { class: 'kv' }, h('span', null, ''), h('span', { class: 'small' }, p.relations.join(' · '))) : null,
     h('div', { class: 'kv' }, h('span', null, 'id'), h('span', { class: 'mono' }, p.id)),
-  )));
+  )), list.differ ? h('p', { class: 'small' }, 'These provenance strings give different created times.') : null);
 }
 
 function shortType(t) {
@@ -163,6 +165,12 @@ function renderC2pa() {
     h('p', { class: 'meta' }, `In ${c.where}${s ? ` · ${s.manifestCount} manifest${s.manifestCount === 1 ? '' : 's'}` : ''}`),
     c.error ? h('p', { class: 'warn' }, `Could not parse manifest: ${c.error}`) : null,
     s && s.generator.length ? h('div', { class: 'kv' }, h('span', null, 'Generator'), h('span', null, s.generator.join(', '))) : null,
+    s && s.title ? h('div', { class: 'kv' }, h('span', null, 'Title'), h('span', null, s.title)) : null,
+    s && s.format ? h('div', { class: 'kv' }, h('span', null, 'Format'), h('span', { class: 'mono' }, s.format)) : null,
+    s && s.instanceID ? h('div', { class: 'kv' }, h('span', null, 'Instance ID'), h('span', { class: 'mono' }, s.instanceID)) : null,
+    s && s.softBinding.length ? h('div', { class: 'kv' }, h('span', null, 'Fingerprint'), h('span', { class: 'mono' }, s.softBinding.join(', '))) : null,
+    s && s.ingredients.length ? h('div', { class: 'sub' }, h('h3', null, 'Ingredients'), h('ul', null, s.ingredients.map((x) => h('li', null, x)))) : null,
+    s && s.signature ? renderSignature(s.signature) : null,
     s && s.actions.length ? h('div', { class: 'sub' }, h('h3', null, 'Actions'), h('ul', null, s.actions.map((a) => h('li', null,
       h('span', { class: 'mono' }, a.action || '?'),
       a.digitalSourceType ? h('div', { class: 'small', title: a.digitalSourceType }, `digitalSourceType: ${shortType(a.digitalSourceType)}`) : null,
@@ -178,6 +186,20 @@ function renderC2pa() {
       radio('keep', 'Keep manifest (will no longer validate)'),
       h('p', { class: 'small' }, 'Required when any other edit is pending. Removal deletes only the manifest container.')),
   );
+}
+
+function renderSignature(sig) {
+  const row = (k, v, mono) => (v ? h('div', { class: 'kv' }, h('span', null, k), h('span', mono ? { class: 'mono' } : null, v)) : null);
+  const valid = sig.notBefore && sig.notAfter ? `${sig.notBefore.slice(0, 10)} to ${sig.notAfter.slice(0, 10)}` : null;
+  return h('div', { class: 'sub' },
+    h('h3', null, 'Signature (as claimed, not validated)'),
+    row('Signer', nameString(sig.signer)),
+    row('Issuer', nameString(sig.issuer)),
+    row('Cert valid', valid),
+    row('Algorithm', sig.alg),
+    row('Signed at', sig.timestamp ? sig.timestamp.replace('T', ' ').replace('Z', ' UTC') : null),
+    row('Timestamp by', nameString(sig.tsa)),
+    sig.errors && sig.errors.length ? h('p', { class: 'small' }, `Could not read: ${sig.errors.join('; ')}`) : null);
 }
 
 function chips(f) {
@@ -261,6 +283,10 @@ function renderEditField(f) {
         h('label', { class: 'mini' }, 'Lang', h('input', { class: 'lang', value: f.value.lang, maxLength: 3, disabled: dis, autocapitalize: 'off', spellcheck: 'false', oninput: onInput((v) => { f.value = { ...f.value, lang: v }; }) })),
         h('label', { class: 'mini grow' }, 'Description', h('input', { value: f.value.desc, disabled: dis, oninput: onInput((v) => { f.value = { ...f.value, desc: v }; }) }))),
       h('textarea', { rows: f.kind === 'lyrics' ? 10 : 3, value: f.value.text, disabled: dis, 'aria-label': f.label, oninput: onInput((v) => { f.value = { ...f.value, text: v }; }) }));
+  } else if (f.kind === 'usertext') {
+    body = h('div', { class: 'stack' },
+      h('label', { class: 'mini grow' }, 'Description', h('input', { value: f.value.desc, disabled: dis, autocapitalize: 'off', oninput: onInput((v) => { f.value = { ...f.value, desc: v }; }) })),
+      h('textarea', { rows: 3, value: f.value.text, disabled: dis, 'aria-label': `${f.label} value`, oninput: onInput((v) => { f.value = { ...f.value, text: v }; }) }));
   } else if (f.kind === 'multiline') {
     body = h('textarea', { rows: f.key === '©lyr' ? 10 : 3, value: f.value, disabled: dis, 'aria-label': f.label, oninput: onInput((v) => { f.value = v; }) });
   } else {

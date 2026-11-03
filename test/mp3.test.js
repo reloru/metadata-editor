@@ -185,7 +185,7 @@ test('ID3v2.3 unsynchronisation: decoded on read, written without it', async () 
   await assertPayloadIntact(bytes, out);
 });
 
-test('MP3 technical: duration from Xing frame count, otherwise unknown', async () => {
+test('MP3 technical: duration from Xing frame count, otherwise estimated from the first frame', async () => {
   const d1 = await open(F.fixture1());
   const tech = Object.fromEntries(d1.technical);
   assert.equal(tech.Duration, '0:26.122');
@@ -193,7 +193,9 @@ test('MP3 technical: duration from Xing frame count, otherwise unknown', async (
   assert.equal(tech.Codec, 'MPEG-1 Layer III');
   assert.ok(d1.fields.some((f) => f.cls === 'protected' && f.key === 'Xing'));
   const d3 = await open(F.fixture3());
-  assert.equal(Object.fromEntries(d3.technical).Duration, 'unknown');
+  const t3 = Object.fromEntries(d3.technical);
+  assert.match(t3.Duration, /estimated from first frame bitrate/);
+  assert.equal(t3.Bitrate, 'CBR (assumed, no Xing/VBRI header) · 128 kbps');
 });
 
 test('MP3 without a tag: adding a field creates an ID3v2.4 tag', async () => {
