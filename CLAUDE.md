@@ -3,7 +3,7 @@
 Static web app (PWA) served by a Cloudflare Worker. Reads and edits metadata in MP3, WAV, AIFF, FLAC, Ogg Vorbis/Opus, M4A, MP4/MOV, JPEG, PNG, WebP, GIF, HEIC/AVIF and TIFF/DNG files entirely in the browser.
 
 ## Layout
-- `public/` — the app. `index.html`, `app.css`, `app.js` (UI), `editor.js` (format-agnostic open/save), `fields.js` (field model), `bytes.js`, `text.js`, `genres.js` (ID3v1 genre table), `cbor.js`, `der.js` (X.509 / RFC 3161 reader for C2PA display), `c2pa.js`, `id3.js`, `mp3.js`, `riff.js`, `bmff.js`, `tiff.js` (EXIF reader, in-place GPS removal), `image.js` (JPEG/PNG/WebP), `flac.js`, `aiff.js`, `heif.js` (HEIC/AVIF view + in-place GPS removal), `ogg.js` (Vorbis/Opus comments), `tiffimg.js` (TIFF/DNG view + in-place GPS removal within the first 4 MB), `gif.js` (comments, XMP/ICC/app extensions; walks the file through a 1 MB window), `manifest.webmanifest`, icons.
+- `public/` — the app. `index.html`, `app.css`, `app.js` (UI), `editor.js` (format-agnostic open/save), `fields.js` (field model), `bytes.js`, `text.js`, `genres.js` (ID3v1 genre table), `cbor.js`, `der.js` (X.509 / RFC 3161 reader for C2PA display), `c2pa.js`, `id3.js`, `mp3.js`, `riff.js`, `bmff.js`, `tiff.js` (EXIF reader, in-place GPS removal), `exifedit.js` (append-only EXIF writer: per-tag edit/add/remove, thumbnail removal), `image.js` (JPEG/PNG/WebP), `flac.js`, `aiff.js`, `heif.js` (HEIC/AVIF view + in-place GPS removal), `ogg.js` (Vorbis/Opus comments), `tiffimg.js` (TIFF/DNG view + in-place GPS removal within the first 4 MB), `gif.js` (comments, XMP/ICC/app extensions; walks the file through a 1 MB window), `manifest.webmanifest`, icons.
 - `src/worker.js` — serves `env.ASSETS`, adds CSP / nosniff / no-referrer headers.
 - `test/` — `node --test`; synthetic fixtures built in `test/fixtures.js`. No real audio is committed.
 - `tools/make-icons.js` — regenerates the PNG icons (`node tools/make-icons.js`).
@@ -15,6 +15,7 @@ Static web app (PWA) served by a Cloudflare Worker. Reads and edits metadata in 
 - Never read whole files into memory except the on-demand C2PA data-hash check. Read metadata regions with `Blob.slice().arrayBuffer()`. Build output as `new Blob([...newParts, file.slice(a, b)])` so payload bytes pass through untouched.
 - Detect format by magic bytes, not extension.
 - Ogg: comment edits are re-laced into the same number of header pages (audio pages untouched); edits that do not fit are refused rather than re-paginating the file (owner may choose otherwise).
+- EXIF edits are append-only: changed IFDs/values go after the existing TIFF data, pointers are updated, replaced bytes are zeroed. Never rebuild a TIFF (MakerNote and thumbnail offsets can be absolute).
 - HEIF items are addressed by absolute offsets (iloc): only same-length in-place rewrites are allowed there.
 - JPEG with an MPF index: segments after the index must not change size (MPF offsets are relative to it); new segments go before it.
 - The owner works only from an iPhone. Target mobile Safari first.

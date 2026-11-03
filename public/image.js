@@ -5,6 +5,7 @@ import { readBytes, u16be, u32be, u32le, fourcc, fourccBytes, concat, formatByte
 import { decodeLatin1, decodeUtf8, decodeUtf8OrLatin1, decodeUtf16be, encodeUtf8, encodeLatin1, isLatin1 } from './text.js';
 import { makeField, isChanged } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
+import { exifTagFields, exifAddable, newExifField, exifChanged, writeExif } from './exifedit.js';
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -78,15 +79,18 @@ export function iccDescription(p) {
   return null;
 }
 
-function exifFields(doc, tiffBytes, where, group) {
+function exifFields(doc, tiffBytes, where, group, opts = {}) {
   let t;
   try { t = parseTiff(tiffBytes); } catch (err) { doc.notes.push(`${where}: ${err.message}`); return null; }
+  if (!doc.exifEdit) {
+    try { doc.exifEdit = { tiff: tiffBytes, fields: exifTagFields(tiffBytes, 'EXIF', opts), readOnly: !!opts.readOnly }; } catch { /* listed read-only via the block */ }
+  }
   const rows = exifRows(t);
   doc.sections.push({ title: `EXIF (${where})`, rows: rows.length ? rows : [['', 'No common fields']] });
   const gps = gpsSummary(t);
   if (gps) {
     doc.gpsField = makeField({ cls: 'edit', kind: 'readonly', key: 'GPS', group, label: 'Location (GPS)', value: '', display: gps, deleteLabel: 'Remove location',
-      note: 'Removing clears only the GPS data; the rest of the EXIF (date, camera, orientation) stays.' });
+      note: 'Removing clears only the GPS data; the rest of the EXIF (date, camera, orientation) stays.', fromExifEdit: !!doc.exifEdit && doc.exifEdit.tiff === tiffBytes });
   }
   const cam = rows.find((r) => r[0] === 'Camera');
   const date = rows.find((r) => r[0] === 'Date taken');
@@ -161,7 +165,9 @@ async function loadJpeg(file) {
     } else if (m === 0xe1 && startsWith(d, 'Exif\0')) {
       s.exif = true;
       s.tiff = d.subarray(6);
-      s.field = pf('EXIF', exifFields(doc, s.tiff, 'APP1', null), { note: 'Deleting EXIF also removes orientation, so a rotated photo may display sideways.' });
+      const first = !doc.exifEdit;
+      s.field = pf('EXIF', exifFields(doc, s.tiff, 'APP1', null, { readOnly: afterMpf }), { note: 'Deleting EXIF also removes orientation, so a rotated photo may display sideways.' });
+      if (first && doc.exifEdit) doc.exifEdit.seg = s;
       if (doc.gpsField) doc.gpsField.seg = s;
     } else if (m === 0xe1 && startsWith(d, 'http://ns.adobe.com/xap/1.0/\0')) {
       s.field = xmpField(doc, decodeUtf8(d.subarray(29)), 'XMP', { key: 'APP1', seg: s, deletable: !afterMpf });
@@ -243,6 +249,7 @@ async function loadJpeg(file) {
   doc.newComments = [];
   const fields = [];
   if (doc.gpsField) fields.push(doc.gpsField);
+  if (doc.exifEdit) fields.push(...doc.exifEdit.fields);
   for (const s of doc.segs) if (s.field) fields.push(s.field);
   if (tables.length) fields.push(makeField({ cls: 'protected', kind: 'info', key: 'tables', label: 'Image coding tables', display: tables.map((s) => markerName(s.marker)).join(', '), deletable: false }));
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'scan', label: 'Compressed image data', display: formatBytes(doc.file.size - doc.sosStart), deletable: false }));
@@ -291,6 +298,16 @@ async function mpfExtras(doc) {
   return out;
 }
 
+// Rewritten EXIF TIFF for doc.exifEdit, or null when nothing in it changed.
+function editedTiff(doc) {
+  const x = doc.exifEdit;
+  if (!x || x.readOnly) return null;
+  const dropGps = !!(doc.gpsField && doc.gpsField.deleted && doc.gpsField.fromExifEdit);
+  // Location removal on its own keeps the same-length in-place path.
+  if (!exifChanged(x.fields, null)) return null;
+  return writeExif(x.tiff, x.fields, { dropGps });
+}
+
 function markerName(m) {
   if (SOF.has(m)) return `SOF${m - 0xc0}`;
   return { 0xc4: 'DHT', 0xdb: 'DQT', 0xdd: 'DRI', 0xcc: 'DAC', 0xdc: 'DNL' }[m] || `0x${m.toString(16)}`;
@@ -311,16 +328,23 @@ function buildJpeg(doc, removeC2pa) {
   let inserted = false;
   const insert = () => { if (!inserted) { parts.push(...newComs); inserted = true; } };
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
+  const tiff = editedTiff(doc);
   for (const s of doc.segs) {
     if (s === doc.mpf) insert();
     const f = s.field;
     if (removeC2pa && doc.c2pa && doc.c2pa.segs.includes(s)) continue;
     if (s.jumbf && s.jumbf.deleted) continue;
     if (f && f.deleted) continue;
+    if (tiff && doc.exifEdit.seg === s) {
+      const len = 2 + 6 + tiff.length;
+      if (len > 0xffff) throw new Error('EXIF is too large for a JPEG segment (64 KB limit); shorten the edited text.');
+      parts.push(concat([new Uint8Array([0xff, 0xe1, len >> 8, len & 255]), s.data.subarray(0, 6), tiff]));
+      continue;
+    }
     if (s.exif && gpsOff && doc.gpsField.seg === s) {
-      const tiff = removeGps(s.tiff);
+      const t = removeGps(s.tiff);
       const len = s.end - s.start - 2;
-      parts.push(tiff ? concat([new Uint8Array([0xff, 0xe1, len >> 8, len & 255]), s.data.subarray(0, 6), tiff]) : doc.file.slice(s.start, s.end));
+      parts.push(t ? concat([new Uint8Array([0xff, 0xe1, len >> 8, len & 255]), s.data.subarray(0, 6), t]) : doc.file.slice(s.start, s.end));
       continue;
     }
     if (f && f.key === 'COM' && f.cls === 'edit' && isChanged(f)) { parts.push(comSegment(f.value)); continue; }
@@ -424,7 +448,9 @@ async function loadPng(file) {
       try { shown = decodeLatin1(await inflate(rest.subarray(1))); } catch { shown = `compressed, ${size}`; }
       c.field = pf(`${keyword} (zTXt)`, shown);
     } else if (type === 'eXIf') {
+      const first = !doc.exifEdit;
       c.field = pf('EXIF (eXIf)', exifFields(doc, c.data, 'eXIf', null), { note: 'Deleting EXIF also removes orientation.' });
+      if (first && doc.exifEdit) doc.exifEdit.chunk = c;
       if (doc.gpsField) doc.gpsField.chunk = c;
     } else if (type === 'caBX') {
       if (!doc.c2pa) doc.c2pa = { where: 'caBX chunk', jumbf: c.data, chunk: c };
@@ -467,6 +493,7 @@ async function loadPng(file) {
 function collectPng(doc) {
   const out = [];
   if (doc.gpsField) out.push(doc.gpsField);
+  if (doc.exifEdit) out.push(...doc.exifEdit.fields);
   for (const c of doc.chunks) if (c.field) out.push(c.field);
   out.push(...doc.newText);
   if (doc.trailingField) out.push(doc.trailingField);
@@ -488,6 +515,7 @@ function textChunk(keyword, text, itxt) {
 function buildPng(doc, removeC2pa) {
   const parts = [Uint8Array.from(PNG_SIG)];
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
+  const tiff = editedTiff(doc);
   let inserted = false;
   for (const c of doc.chunks) {
     if (!inserted && c.type === 'IDAT') {
@@ -497,6 +525,7 @@ function buildPng(doc, removeC2pa) {
     const f = c.field;
     if (removeC2pa && doc.c2pa && doc.c2pa.chunk === c) continue;
     if (f && f.deleted) continue;
+    if (tiff && doc.exifEdit.chunk === c) { parts.push(pngChunk('eXIf', tiff)); continue; }
     if (c.type === 'eXIf' && gpsOff && doc.gpsField.chunk === c) {
       const t = removeGps(c.data);
       parts.push(t ? pngChunk('eXIf', t) : doc.file.slice(c.start, c.end));
@@ -542,7 +571,9 @@ async function loadWebp(file) {
       c.tiffAt = startsWith(d, 'Exif\0\0') ? 6 : 0;
       c.data = d;
       d = d.subarray(c.tiffAt);
+      const first = !doc.exifEdit;
       c.field = makeField({ cls: 'preserve', kind: 'info', key: id, label: 'EXIF', display: exifFields(doc, d, 'EXIF chunk', null), chunk: c, note: null });
+      if (first && doc.exifEdit) doc.exifEdit.chunk = c;
       if (doc.gpsField) doc.gpsField.chunk = c;
     } else if (id === 'XMP ') {
       c.field = xmpField(doc, decodeUtf8(await readBytes(file, o + 8, o + 8 + size)), 'XMP', { key: 'XMP', chunk: c });
@@ -570,7 +601,7 @@ async function loadWebp(file) {
     doc.trailingStart = o;
     doc.trailingField = makeField({ cls: 'preserve', kind: 'info', key: 'trailing', label: 'Data after RIFF chunk', display: formatBytes(file.size - o) });
   }
-  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
+  collectWebp(doc);
   const kinds = ['EXIF', 'XMP ', 'ICCP'].filter((k) => doc.chunks.some((c) => c.id === k)).map((k) => (k === 'ICCP' ? 'ICC' : k.trim()));
   doc.technical.push(['Container', 'WebP'], ['Dimensions', dims ? `${dims.w}×${dims.h}` : 'unknown'], ['Coding', kind + (doc.chunks.some((c) => c.id === 'ANIM') ? ', animated' : '')], ['Metadata', kinds.join(', ') || 'none']);
   if (!doc.sections.some((s) => s.title.startsWith('EXIF'))) doc.notes.push(NO_EXIF_NOTE);
@@ -578,9 +609,14 @@ async function loadWebp(file) {
   return doc;
 }
 
+function collectWebp(doc) {
+  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
+}
+
 function buildWebp(doc) {
   const body = [];
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
+  const tiff = editedTiff(doc);
   const gone = new Set(doc.chunks.filter((c) => c.field && c.field.deleted).map((c) => c.id));
   for (const c of doc.chunks) {
     if (c.field && c.field.deleted) continue;
@@ -591,6 +627,11 @@ function buildWebp(doc) {
         body.push(concat([fourccBytes('VP8X'), u32leBytes(c.size), new Uint8Array([flags])]), doc.file.slice(c.start + 9, c.end));
         continue;
       }
+    }
+    if (tiff && doc.exifEdit.chunk === c) {
+      const data = concat([c.data.subarray(0, c.tiffAt), tiff]);
+      body.push(concat([fourccBytes('EXIF'), u32leBytes(data.length), data, data.length & 1 ? new Uint8Array(1) : new Uint8Array(0)]));
+      continue;
     }
     if (c.id === 'EXIF' && gpsOff && doc.gpsField.chunk === c) {
       const t = removeGps(c.data.subarray(c.tiffAt));
@@ -611,16 +652,26 @@ function buildWebp(doc) {
 // ---- module interface ----
 
 export function addable(doc) {
-  if (doc.format === 'WebP') return [];
+  const exif = doc.exifEdit && !doc.exifEdit.readOnly ? exifAddable(doc.exifEdit.fields) : [];
+  if (doc.format === 'WebP') return exif;
   if (doc.format === 'JPEG') {
     const has = doc.fields.some((f) => f.key === 'COM' && !f.deleted) || doc.newComments.some((f) => !f.deleted);
-    return has ? [] : [{ key: 'COM', label: 'Comment (COM)' }];
+    return [...exif, ...(has ? [] : [{ key: 'COM', label: 'Comment (COM)' }])];
   }
   const live = doc.fields.filter((f) => !f.deleted && (f.key === 'tEXt' || f.key === 'iTXt'));
-  return PNG_TEXT_KEYS.filter((k) => !live.some((f) => f.keyword === k)).map((k) => ({ key: k, label: `${k} (text chunk)` }));
+  return [...exif, ...PNG_TEXT_KEYS.filter((k) => !live.some((f) => f.keyword === k)).map((k) => ({ key: k, label: `${k} (text chunk)` }))];
 }
 
 export function addField(doc, key) {
+  if (key.startsWith('EXIFTAG:')) {
+    const f = newExifField(key, 'EXIF');
+    const prev = doc.exifEdit.fields[doc.exifEdit.fields.length - 1];
+    doc.exifEdit.fields.push(f);
+    if (doc.format === 'JPEG') { const i = doc.fields.indexOf(prev); doc.fields.splice(i < 0 ? 0 : i + 1, 0, f); }
+    else if (doc.format === 'PNG') collectPng(doc);
+    else collectWebp(doc);
+    return f;
+  }
   if (doc.format === 'JPEG') {
     const f = makeField({ key: 'COM', label: 'Comment (COM)', kind: 'multiline', value: '', isNew: true, validate: comValidate });
     doc.newComments.push(f);
@@ -634,6 +685,13 @@ export function addField(doc, key) {
 }
 
 export function removeNewField(doc, f) {
+  if (f.exifTag) {
+    doc.exifEdit.fields.splice(doc.exifEdit.fields.indexOf(f), 1);
+    if (doc.format === 'JPEG') doc.fields.splice(doc.fields.indexOf(f), 1);
+    else if (doc.format === 'PNG') collectPng(doc);
+    else collectWebp(doc);
+    return;
+  }
   if (doc.format === 'JPEG') {
     doc.newComments.splice(doc.newComments.indexOf(f), 1);
     doc.fields.splice(doc.fields.indexOf(f), 1);

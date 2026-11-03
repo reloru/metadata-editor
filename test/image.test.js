@@ -88,7 +88,7 @@ test('JPEG: comment edit and delete', async () => {
   re.c2pa.choice = 'keep';
   const re2 = await open(await save(re));
   assert.equal(re2.fields.find((f) => f.key === 'COM'), undefined);
-  assert.deepEqual(addable(re2), [{ key: 'COM', label: 'Comment (COM)' }]);
+  assert.ok(addable(re2).some((a) => a.key === 'COM'));
 });
 
 test('JPEG with MPF: blocks after the index are fixed; new comment goes before the index; trailing image kept', async () => {

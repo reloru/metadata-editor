@@ -2,9 +2,9 @@
 
 import { decodeUtf8OrLatin1, decodeUtf16 } from './text.js';
 
-const SIZES = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
+export const SIZES = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8 };
 
-function reader(b) {
+export function reader(b) {
   if (b.length < 8) throw new Error('TIFF too short');
   const le = b[0] === 0x49 && b[1] === 0x49;
   if (!le && !(b[0] === 0x4d && b[1] === 0x4d)) throw new Error('Not a TIFF header');
@@ -13,7 +13,7 @@ function reader(b) {
   return { le, u16, u32 };
 }
 
-function readIfd(b, r, off) {
+export function readIfd(b, r, off) {
   if (!off || off + 2 > b.length) return null;
   const n = r.u16(off);
   if (off + 2 + n * 12 + 4 > b.length) throw new Error('IFD exceeds data');
