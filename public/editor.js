@@ -11,14 +11,14 @@ import * as image from './image.js';
 import * as flac from './flac.js';
 import * as aiff from './aiff.js';
 import * as heif from './heif.js';
+import * as ogg from './ogg.js';
 import { readHeader as id3Header } from './id3.js';
 
-const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', HEIC: 'image/heic', AVIF: 'image/avif' };
+const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', Opus: 'audio/ogg', 'Ogg Vorbis': 'audio/ogg', HEIC: 'image/heic', AVIF: 'image/avif' };
 
 function unsupported(head) {
   if (head.length >= 4) {
     const t = fourcc(head, 0);
-    if (t === 'OggS') return 'Ogg';
     if (t === 'RIFF' && head.length >= 12 && fourcc(head, 8) === 'WEBP') return 'WebP image';
     if (t === 'GIF8') return 'GIF image';
     if (t === '%PDF') return 'PDF';
@@ -38,11 +38,12 @@ export async function openFile(file) {
   else if (image.detect(head)) mod = image;
   else if (heif.detect(head)) mod = heif;
   else if (flac.detect(head)) mod = flac;
+  else if (ogg.detect(head)) mod = ogg;
   else if (aiff.detect(head)) mod = aiff;
   else if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
   else if (await mp3.detect(head)) mod = mp3;
-  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, M4A, MP4/MOV, JPEG, PNG or HEIC (detected by content, not extension).');
+  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, Ogg, M4A, MP4/MOV, JPEG, PNG or HEIC (detected by content, not extension).');
   const doc = await mod.load(file);
   if (mod === mp3 && doc.tagEnd) {
     const after = await readBytes(file, doc.tagEnd, doc.tagEnd + 4);
