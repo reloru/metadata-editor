@@ -194,3 +194,14 @@ test('WebP: EXIF/XMP/ICC read; location removed in place; deleting chunks clears
   assert.equal(Object.fromEntries(re.technical).Metadata, 'EXIF');
   assert.deepEqual(await save(await open(before)), before);
 });
+
+test('Images: notes when EXIF lacks camera, date and location, or is missing', async () => {
+  const be = (v) => F.u16be(v);
+  const tiff = F.concat([latin1('MM'), be(42), u32be(8), be(1), be(0x0112), be(3), u32be(1), be(1), be(0), u32be(0)]);
+  const stripped = F.concat([new Uint8Array([0xff, 0xd8]), F.jpegSeg(0xe1, F.concat([latin1('Exif\0\0'), tiff])), F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be(8), be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
+  assert.ok((await open(stripped)).notes.some((n) => /no camera, date or location/.test(n)));
+  const none = F.concat([new Uint8Array([0xff, 0xd8]), F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be(8), be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
+  assert.ok((await open(none)).notes.some((n) => /^No EXIF in this file/.test(n)));
+  const full = await open(F.jpegFixture());
+  assert.ok(!full.notes.some((n) => /no camera, date or location|^No EXIF/.test(n)));
+});
