@@ -205,3 +205,37 @@ test('Images: notes when EXIF lacks camera, date and location, or is missing', a
   const full = await open(F.jpegFixture());
   assert.ok(!full.notes.some((n) => /no camera, date or location|^No EXIF/.test(n)));
 });
+
+function mpfWithGpsInExtra() {
+  const be = (v) => F.u16be(v);
+  const sof = F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be(8), be(8), new Uint8Array([1, 1, 0x11, 0])]));
+  const exif = F.jpegSeg(0xe1, F.concat([latin1('Exif\0\0'), F.tiffWithGps()]));
+  const second = F.concat([new Uint8Array([0xff, 0xd8]), exif, sof, F.JPEG_SCAN]);
+  const build = (mainLen, extraOff) => {
+    const entries = F.concat([u32be(0x20030000), u32be(mainLen), u32be(0), be(0), be(0), u32be(0), u32be(second.length), u32be(extraOff), be(0), be(0)]);
+    const ifd = F.concat([be(3), be(0xb000), be(7), u32be(4), latin1('0100'), be(0xb001), be(4), u32be(1), u32be(2), be(0xb002), be(7), u32be(32), u32be(50), u32be(0)]);
+    const mpf = F.jpegSeg(0xe2, F.concat([latin1('MPF\0'), latin1('MM'), be(42), u32be(8), ifd, entries]));
+    const head = F.concat([new Uint8Array([0xff, 0xd8]), exif]);
+    const main = F.concat([head, mpf, sof, F.JPEG_SCAN]);
+    return { file: F.concat([main, second]), mainLen: main.length, base: head.length + 8 };
+  };
+  const a = build(0, 0);
+  return build(a.mainLen, a.mainLen - a.base).file;
+}
+
+test('JPEG MPF: GPS in an extra image is found and removed in place along with the main image', async () => {
+  const before = mpfWithGpsInExtra();
+  const doc = await open(before);
+  const extra = doc.fields.find((f) => f.key === 'MPF');
+  assert.equal(extra.label, 'Extra image 2 (MPF)');
+  assert.match(extra.display, /EXIF with location/);
+  assert.match(find(doc, 'GPS').note, /Also stored in 1 extra image/);
+  find(doc, 'GPS').deleted = true;
+  const out = await save(doc);
+  assert.equal(out.length, before.length);
+  assert.equal(F.indexOf(out, u32be(1234)), -1, 'no GPS rational left anywhere');
+  const re = await open(out);
+  assert.equal(re.fields.find((f) => f.key === 'GPS'), undefined);
+  assert.match(re.fields.find((f) => f.key === 'MPF').display, /EXIF, no location/);
+  assert.deepEqual(re.sections[0].rows.find((r) => r[0] === 'Camera'), ['Camera', 'Apple']);
+});

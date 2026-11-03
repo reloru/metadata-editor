@@ -165,9 +165,20 @@ async function loadJpeg(file) {
         const r16 = (x) => (le ? t[x] | (t[x + 1] << 8) : (t[x] << 8) | t[x + 1]);
         const r32 = (x) => (le ? (t[x] | (t[x + 1] << 8) | (t[x + 2] << 16) | (t[x + 3] << 24)) >>> 0 : u32be(t, x));
         const ifd = r32(4);
-        for (let i = 0; i < r16(ifd); i++) if (r16(ifd + 2 + i * 12) === 0xb001) count = r32(ifd + 2 + i * 12 + 8);
+        for (let i = 0; i < r16(ifd); i++) {
+          const e = ifd + 2 + i * 12;
+          if (r16(e) === 0xb001) count = r32(e + 8);
+          if (r16(e) === 0xb002) {
+            // MP entries: attribute, size, offset (relative to the MP header; 0 for the first image), two dependents.
+            const n = r32(e + 4) / 16;
+            const at = r32(e + 8);
+            doc.mpfEntries = [];
+            for (let k = 0; k < n && at + k * 16 + 16 <= t.length; k++) doc.mpfEntries.push({ size: r32(at + k * 16 + 4), offset: r32(at + k * 16 + 8) });
+          }
+        }
       } catch { /* count stays unknown */ }
       doc.mpf = s;
+      doc.mpfBase = s.start + 8;
       s.field = makeField({ cls: 'protected', kind: 'info', key: 'APP2', label: 'Multi-picture index (MPF)', display: `${count} images (extra images follow the main one)`, deletable: false });
     } else if (m === 0xeb && startsWith(d, 'JP') && d.length >= 16) {
       const inst = u16be(d, 2);
@@ -206,6 +217,14 @@ async function loadJpeg(file) {
     for (const x of list) x.s.jumbf = f;
   }
   if (doc.mpf) doc.notes.push('This JPEG holds extra images after the main one (MPF). Blocks after the MPF index cannot be changed without breaking them.');
+  doc.extras = await mpfExtras(doc);
+  const extraGps = doc.extras.filter((x) => x.gps);
+  if (extraGps.length) {
+    if (!doc.gpsField) {
+      doc.gpsField = makeField({ cls: 'edit', kind: 'readonly', key: 'GPS', label: 'Location (GPS)', value: '', display: extraGps[0].gps, deleteLabel: 'Remove location' });
+    }
+    doc.gpsField.note = `Also stored in ${extraGps.length} extra image${extraGps.length === 1 ? '' : 's'}; removing clears it everywhere. The rest of the EXIF stays.`;
+  }
 
   doc.newComments = [];
   const fields = [];
@@ -213,6 +232,10 @@ async function loadJpeg(file) {
   for (const s of doc.segs) if (s.field) fields.push(s.field);
   if (tables.length) fields.push(makeField({ cls: 'protected', kind: 'info', key: 'tables', label: 'Image coding tables', display: tables.map((s) => markerName(s.marker)).join(', '), deletable: false }));
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'scan', label: 'Compressed image data', display: formatBytes(doc.file.size - doc.sosStart), deletable: false }));
+  for (const x of doc.extras) {
+    fields.push(makeField({ cls: 'protected', kind: 'info', key: 'MPF', label: `Extra image ${x.index + 1} (MPF)`, deletable: false,
+      display: `${formatBytes(x.size)} · ${x.tiff ? (x.gps ? 'EXIF with location' : 'EXIF, no location') : 'no EXIF'}` }));
+  }
   doc.fields = fields;
   doc.technical.push(['Container', 'JPEG']);
   if (sof) doc.technical.push(['Dimensions', `${sof.width}×${sof.height}`], ['Coding', `${sof.kind}, ${sof.bits}-bit`], ['Components', String(sof.comps)]);
@@ -221,6 +244,37 @@ async function loadJpeg(file) {
   if (!doc.sections.some((s) => s.title.startsWith('EXIF'))) doc.notes.push(NO_EXIF_NOTE);
   doc.summary = `JPEG${sof ? ` · ${sof.width}×${sof.height}` : ''}${kinds.length ? ' · ' + kinds.join(', ') : ''}`;
   return doc;
+}
+
+// Secondary images listed in the MPF index: find each one's EXIF (APP1) and whether it holds GPS.
+// Only the head of each image is read.
+async function mpfExtras(doc) {
+  const out = [];
+  if (!doc.mpfEntries) return out;
+  for (let i = 1; i < doc.mpfEntries.length; i++) {
+    const { size, offset } = doc.mpfEntries[i];
+    if (!offset) continue;
+    const abs = doc.mpfBase + offset;
+    if (abs < doc.sosStart || abs + 4 > doc.file.size) continue;
+    const head = await readBytes(doc.file, abs, Math.min(abs + size, abs + 131072, doc.file.size));
+    const x = { index: i, size, tiff: null, absTiff: null, gps: null };
+    out.push(x);
+    if (head[0] !== 0xff || head[1] !== 0xd8) continue;
+    let o = 2;
+    while (o + 4 <= head.length && head[o] === 0xff) {
+      const m = head[o + 1];
+      if (m === 0xda || m === 0xd9) break;
+      const end = o + 2 + u16be(head, o + 2);
+      if (m === 0xe1 && startsWith(head, 'Exif\0\0', o + 4) && end <= head.length) {
+        x.tiff = head.subarray(o + 10, end);
+        x.absTiff = abs + o + 10;
+        try { x.gps = gpsSummary(parseTiff(x.tiff)); } catch { x.gps = null; }
+        break;
+      }
+      o = end;
+    }
+  }
+  return out;
 }
 
 function markerName(m) {
@@ -259,7 +313,17 @@ function buildJpeg(doc, removeC2pa) {
     parts.push(doc.file.slice(s.start, s.end));
   }
   insert();
-  parts.push(doc.file.slice(doc.sosStart));
+  // Image data and any MPF extra images; their GPS is removed in place (same length) so MPF offsets stay valid.
+  let pos = doc.sosStart;
+  if (gpsOff) {
+    for (const x of doc.extras.filter((e) => e.gps).sort((a, b) => a.absTiff - b.absTiff)) {
+      const t = removeGps(x.tiff);
+      if (!t || x.absTiff < pos) continue;
+      parts.push(doc.file.slice(pos, x.absTiff), t);
+      pos = x.absTiff + t.length;
+    }
+  }
+  parts.push(doc.file.slice(pos));
   return parts;
 }
 
