@@ -10,11 +10,10 @@ import * as bmff from './bmff.js';
 import * as image from './image.js';
 import * as flac from './flac.js';
 import * as aiff from './aiff.js';
+import * as heif from './heif.js';
 import { readHeader as id3Header } from './id3.js';
 
-const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff' };
-
-const IMAGE_BRANDS = new Set(['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1', 'avif', 'avis']);
+const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', HEIC: 'image/heic', AVIF: 'image/avif' };
 
 function unsupported(head) {
   if (head.length >= 4) {
@@ -25,7 +24,6 @@ function unsupported(head) {
     if (t === '%PDF') return 'PDF';
     if (t === 'PK\x03\x04') return 'ZIP-based (Office, archive)';
   }
-  if (head.length >= 12 && fourcc(head, 4) === 'ftyp' && IMAGE_BRANDS.has(fourcc(head, 8))) return 'HEIF/AVIF image';
   return null;
 }
 
@@ -38,12 +36,13 @@ export async function openFile(file) {
   const afterTag = tag ? await readBytes(file, tag.totalSize, tag.totalSize + 16) : null;
   if (afterTag && flac.detect(afterTag)) mod = flac;
   else if (image.detect(head)) mod = image;
+  else if (heif.detect(head)) mod = heif;
   else if (flac.detect(head)) mod = flac;
   else if (aiff.detect(head)) mod = aiff;
   else if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
   else if (await mp3.detect(head)) mod = mp3;
-  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, M4A, MP4/MOV, JPEG or PNG (detected by content, not extension).');
+  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, M4A, MP4/MOV, JPEG, PNG or HEIC (detected by content, not extension).');
   const doc = await mod.load(file);
   if (mod === mp3 && doc.tagEnd) {
     const after = await readBytes(file, doc.tagEnd, doc.tagEnd + 4);

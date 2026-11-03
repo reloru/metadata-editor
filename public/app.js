@@ -183,7 +183,7 @@ function renderC2pa() {
     h('p', { class: 'small' }, 'Signatures and certificates are not validated.'),
     doc.readOnly ? null : h('fieldset', { class: 'choice' },
       h('legend', null, 'On save'),
-      radio('remove', 'Remove C2PA manifest'),
+      c.noRemove ? null : radio('remove', 'Remove C2PA manifest'),
       radio('keep', 'Keep manifest (will no longer validate)'),
       h('p', { class: 'small' }, 'Required when any other edit is pending. Removal deletes only the manifest container.')),
   );

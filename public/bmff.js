@@ -2,7 +2,7 @@
 
 import {
   readBytes, u16be, u32be, u64be, i16be, putU32be, putU64be, fourcc, fourccBytes, concat, uuidString,
-  formatBytes, formatDuration, partsSize,
+  formatBytes, formatDuration, partsSize, u32beBytes,
 } from './bytes.js';
 import { decodeUtf8, decodeUtf16be, encodeUtf8, validateTrack16, validateBpm16, validateMp4Day, validateBool, parseTrack } from './text.js';
 import { gnreName } from './genres.js';
@@ -325,6 +325,61 @@ function encodeItemData(f, origData, value = f.value) {
   return makeBox('data', head, payload);
 }
 
+// ---- QuickTime keys/mdta metadata (moov/meta with an 'mdta' handler) ----
+
+const LOCATION_KEY = /location/i;
+
+function qtKeys(buf, meta) {
+  const keys = child(meta, 'keys');
+  const ilst = child(meta, 'ilst');
+  if (!keys || !ilst || !ilst.children) return null;
+  const p = keys.start + keys.hdr;
+  const n = u32be(buf, p + 4);
+  const names = [];
+  let o = p + 8;
+  for (let i = 0; i < n && o + 8 <= keys.start + keys.size; i++) {
+    const sz = u32be(buf, o);
+    if (sz < 8) break;
+    names.push(decodeUtf8(buf.subarray(o + 8, o + sz)));
+    o += sz;
+  }
+  const items = ilst.children.map((it) => {
+    const idx = u32be(buf, it.start + 4);
+    const d = it.children ? it.children.find((x) => x.type === 'data') : null;
+    return { node: it, idx, key: names[idx - 1] || `#${idx}`, value: d ? decodeData(dataBox(buf, d)) : '' };
+  });
+  return { meta, keys, ilst, names, items };
+}
+
+// 3GPP 'loci' (TS 26.244): FullBox, language, name, role, then 16.16 longitude, latitude, altitude.
+function lociText(buf, n) {
+  const end = n.start + n.size;
+  let o = n.start + n.hdr + 6;
+  const utf16 = buf[o] === 0xfe && buf[o + 1] === 0xff;
+  if (utf16) { o += 2; while (o + 1 < end && (buf[o] || buf[o + 1])) o += 2; o += 2; } else { while (o < end && buf[o]) o++; o++; }
+  o += 1;
+  if (o + 12 > end) return 'unreadable';
+  const fx = (x) => (u32be(buf, x) | 0) / 65536;
+  return `${fx(o + 4).toFixed(5)}, ${fx(o).toFixed(5)}${fx(o + 8) ? `, ${fx(o + 8).toFixed(1)} m` : ''}`;
+}
+
+// Rebuild moov/meta keeping only the keys `keep` accepts; item indices are renumbered.
+function rebuildQtMeta(buf, q, keep) {
+  const kept = q.names.map((name, i) => ({ name, idx: i + 1 })).filter((k) => keep(k.name));
+  const renum = new Map(kept.map((k, i) => [k.idx, i + 1]));
+  const keyEntries = kept.map((k) => { const s = encodeUtf8(k.name); return concat([u32beBytes(8 + s.length), fourccBytes('mdta'), s]); });
+  const keysBox = makeBox('keys', buf.subarray(q.keys.start + q.keys.hdr, q.keys.start + q.keys.hdr + 4), u32beBytes(kept.length), ...keyEntries);
+  const items = [];
+  for (const it of q.items) {
+    if (!renum.has(it.idx)) continue;
+    const body = buf.subarray(it.node.start + it.node.hdr, it.node.start + it.node.size);
+    items.push(concat([u32beBytes(8 + body.length), u32beBytes(renum.get(it.idx)), body]));
+  }
+  const ilstBox = makeBox('ilst', ...items);
+  const parts = q.meta.children.map((c) => (c === q.keys ? keysBox : c === q.ilst ? ilstBox : buf.subarray(c.start, c.start + c.size)));
+  return wrapLike(buf, q.meta, concat([buf.subarray(q.meta.start + q.meta.hdr, q.meta.start + q.meta.hdr + q.meta.fb), ...parts]));
+}
+
 // ---- load ----
 
 function mdhdTimescale(buf, trak) {
@@ -370,7 +425,7 @@ export function detect(head) {
 export async function load(file) {
   const doc = {
     format: 'MP4', file, fields: [], technical: [], notes: [], c2pa: null, readOnly: null,
-    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null,
+    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null, udtaLocations: [],
   };
   let o = 0;
   let brands = null;
@@ -444,7 +499,7 @@ export async function load(file) {
     if (handler === 'vide') hasVideo = true;
     tracks.push({ handler, entry, detail });
   }
-  doc.format = hasVideo ? 'MP4' : 'M4A';
+  doc.format = hasVideo ? (brands && brands.major === 'qt  ' ? 'MOV' : 'MP4') : 'M4A';
   doc.timedText = timedText;
 
   // Metadata path.
@@ -469,6 +524,15 @@ export async function load(file) {
   // moov-level fields.
   const moovFields = [];
   const sizeOf = (n) => formatBytes(n.size);
+  const keysMetaField = (node, where) => {
+    const q = node.children ? qtKeys(buf, node) : null;
+    if (q && !doc.qt) {
+      doc.qt = q;
+      doc.sections = [{ title: 'QuickTime metadata (keys)', rows: q.items.map((it) => [it.key.replace(/^com\.apple\.quicktime\./, ''), it.value]) }];
+    }
+    return makeField({ cls: 'preserve', kind: 'info', key: 'meta', label: `QuickTime metadata (${where} keys)`, node,
+      display: q ? `${q.items.length} items${q.items.some((it) => LOCATION_KEY.test(it.key)) ? ', includes location' : ''} · ${sizeOf(node)}` : sizeOf(node) });
+  };
   for (const c of moov.children) {
     if (c.type === 'mvhd') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie header (mvhd)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'trak') {
@@ -483,17 +547,30 @@ export async function load(file) {
             if (mc.type === 'hdlr') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: 'hdlr', label: 'Metadata handler (meta/hdlr mdir)', deletable: false, display: sizeOf(mc) }));
             else moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: mc.type, label: `meta/${mc.type}`, display: sizeOf(mc), node: mc }));
           }
+        } else if (u.type === 'meta' && u.children && qtKeys(buf, u)) {
+          moovFields.push(keysMetaField(u, 'udta/meta'));
+        } else if (u.type === '\u00a9xyz' || u.type === 'loci') {
+          const loc = u.type === 'loci' ? lociText(buf, u) : decodeUtf8(buf.subarray(u.start + u.hdr + 4, Math.min(u.start + u.size, u.start + u.hdr + 4 + u16be(buf, u.start + u.hdr))));
+          doc.udtaLocations.push({ node: u, value: loc });
+          moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: u.type, label: `Location (udta/${u.type})`, display: loc, node: u }));
         } else {
           moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: u.type, label: `udta/${u.type}`, display: sizeOf(u), node: u }));
         }
       }
     } else if (c.type === 'meta') {
-      moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: 'meta', label: 'moov/meta (QuickTime keys/mdta)', display: sizeOf(c), node: c }));
+      moovFields.push(keysMetaField(c, 'moov/meta'));
     } else {
       moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: c.type, label: `moov/${c.type}`, display: sizeOf(c), node: c }));
     }
   }
   doc.moovFields = moovFields;
+  const qtLoc = doc.qt ? doc.qt.items.filter((it) => LOCATION_KEY.test(it.key)) : [];
+  if (qtLoc.length || doc.udtaLocations.length) {
+    const iso = qtLoc.find((it) => /ISO6709$/.test(it.key));
+    doc.locationField = makeField({ cls: 'edit', kind: 'readonly', key: 'location', label: 'Location', value: '',
+      display: (iso && iso.value) || (doc.udtaLocations[0] && doc.udtaLocations[0].value) || qtLoc.map((it) => it.value).join(', '),
+      deleteLabel: 'Remove location', note: 'Removing deletes only the location entries; other metadata stays.' });
+  }
   rebuildFieldList(doc);
 
   // Technical.
@@ -526,6 +603,7 @@ export async function load(file) {
 
 function rebuildFieldList(doc) {
   const out = [];
+  if (doc.locationField) out.push(doc.locationField);
   for (const b of doc.top) {
     if (b === doc.moovBox) out.push(...doc.ilstFields, ...doc.moovFields);
     else if (b.field) out.push(b.field);
@@ -643,6 +721,10 @@ export async function build(doc, opts = {}) {
   };
 
   for (const f of doc.moovFields) if (f.node && f.deleted) replace(f.node, null);
+  if (doc.locationField && doc.locationField.deleted) {
+    for (const l of doc.udtaLocations) if (!ctx.replace.has(l.node)) replace(l.node, null);
+    if (doc.qt && !ctx.replace.has(doc.qt.meta)) replace(doc.qt.meta, rebuildQtMeta(buf, doc.qt, (k) => !LOCATION_KEY.test(k)));
+  }
 
   if (doc.ilstFields.some(isChanged)) {
     const items = buildIlstChildren(doc);
