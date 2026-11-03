@@ -154,6 +154,6 @@ test('QuickTime .mov (ftyp qt) opens through the BMFF module', async () => {
   const b = F.fixture6().slice();
   b.set([0x71, 0x74, 0x20, 0x20], 8);
   const doc = await open(b);
-  assert.equal(doc.format, 'MP4');
+  assert.equal(doc.format, 'MOV');
   assert.match(Object.fromEntries(doc.technical).Brands, /^qt {2}/);
 });
