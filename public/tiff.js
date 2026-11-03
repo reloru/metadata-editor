@@ -189,5 +189,5 @@ export function gpsTimeNote(t) {
   const taken = exifUtc(str(t.exif, 0x9003), str(t.exif, 0x9011));
   if (!Number.isFinite(gpsMs) || !Number.isFinite(taken) || Math.abs(gpsMs - taken) <= 3600000) return null;
   const gpsText = new Date(gpsMs).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
-  return `The GPS timestamp (${gpsText}) does not match Date taken (${str(t.exif, 0x9003)} ${str(t.exif, 0x9011)}). If the date was edited, the GPS time may still show the original capture time; Remove location also removes it.`;
+  return `The GPS timestamp (${gpsText}) does not match Date taken (${str(t.exif, 0x9003)} ${str(t.exif, 0x9011)}). One of them was probably edited: the GPS time can show when the location was set (for example with Photos' Adjust), and Date taken can be changed the same way. Remove location also removes the GPS time.`;
 }
