@@ -209,3 +209,22 @@ test('HEIC: Photo info caption and date written to the EXIF item', async () => {
   assert.equal(find(re, 'DateTimeOriginal').value, '2026:11:03 14:12:55');
   assert.equal(find(re, 'taken').value, '2026-11-03 14:12:55 -06:00');
 });
+
+test('MOV: QuickTime keys editable/removable/addable; Video info writes caption, keywords, date and the movie header', async () => {
+  const doc = await open(mov());
+  assert.equal(find(doc, 'make').value, 'Apple');
+  find(doc, 'make').deleted = true;
+  find(doc, 'caption').value = 'Hello & bye';
+  find(doc, 'keywords').value = 'a,b';
+  find(doc, 'taken').value = '2025-07-04T12:00:00-05:00';
+  addField(doc, 'QTKEY:com.apple.quicktime.title').value = 'T1';
+  find(doc, 'location').deleted = true;
+  const re = await open(await buildOutput(doc).then((b) => b.arrayBuffer()).then((a) => new Uint8Array(a)));
+  assert.equal(re.fields.find((f) => f.key === 'make'), undefined);
+  assert.equal(re.fields.find((f) => f.key === 'location'), undefined);
+  assert.equal(find(re, 'caption').value, 'Hello & bye');
+  assert.equal(find(re, 'keywords').value, 'a,b');
+  assert.equal(find(re, 'taken').value, '2025-07-04T12:00:00-05:00');
+  assert.equal(find(re, 'title').value, 'T1');
+  assert.equal(Object.fromEntries(re.technical)['Created (mvhd)'], '2025-07-04T17:00:00Z');
+});
