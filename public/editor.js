@@ -8,17 +8,18 @@ import * as mp3 from './mp3.js';
 import * as riff from './riff.js';
 import * as bmff from './bmff.js';
 import * as image from './image.js';
+import * as flac from './flac.js';
+import * as aiff from './aiff.js';
+import { readHeader as id3Header } from './id3.js';
 
-const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png' };
+const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff' };
 
 const IMAGE_BRANDS = new Set(['heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1', 'avif', 'avis']);
 
 function unsupported(head) {
   if (head.length >= 4) {
     const t = fourcc(head, 0);
-    if (t === 'fLaC') return 'FLAC';
     if (t === 'OggS') return 'Ogg';
-    if (t === 'FORM' && head.length >= 12 && /^AIF[FC]$/.test(fourcc(head, 8))) return 'AIFF';
     if (t === 'RIFF' && head.length >= 12 && fourcc(head, 8) === 'WEBP') return 'WebP image';
     if (t === 'GIF8') return 'GIF image';
     if (t === '%PDF') return 'PDF';
@@ -33,11 +34,16 @@ export async function openFile(file) {
   const other = unsupported(head);
   if (other) throw new Error(`${other} files are not supported yet.`);
   let mod;
-  if (image.detect(head)) mod = image;
+  const tag = id3Header(head);
+  const afterTag = tag ? await readBytes(file, tag.totalSize, tag.totalSize + 16) : null;
+  if (afterTag && flac.detect(afterTag)) mod = flac;
+  else if (image.detect(head)) mod = image;
+  else if (flac.detect(head)) mod = flac;
+  else if (aiff.detect(head)) mod = aiff;
   else if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
   else if (await mp3.detect(head)) mod = mp3;
-  else throw new Error('Unrecognized file: not MP3, WAV, M4A, MP4/MOV, JPEG or PNG (detected by content, not extension).');
+  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, M4A, MP4/MOV, JPEG or PNG (detected by content, not extension).');
   const doc = await mod.load(file);
   if (mod === mp3 && doc.tagEnd) {
     const after = await readBytes(file, doc.tagEnd, doc.tagEnd + 4);
