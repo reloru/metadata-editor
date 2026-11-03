@@ -5,7 +5,7 @@
 import { readBytes, u16be, u32be, u64be, fourcc, formatBytes } from './bytes.js';
 import { decodeUtf8 } from './text.js';
 import { makeField } from './fields.js';
-import { parseTiff, exifRows, gpsSummary, removeGps } from './tiff.js';
+import { parseTiff, exifRows, gpsSummary, removeGps, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 import { xmpInfo } from './image.js';
 import { C2PA_BMFF_UUID, jumbfFromBmffUuidPayload } from './c2pa.js';
 
@@ -178,6 +178,7 @@ export async function load(file) {
       }
       const cam = rows.find((x) => x[0] === 'Camera');
       const date = rows.find((x) => x[0] === 'Date taken');
+      if (!cam && !date && !gps) doc.notes.push(STRIPPED_NOTE);
       fields.push(makeField({ cls: 'preserve', kind: 'info', key: 'Exif', label: 'EXIF', deletable: false,
         display: [cam && cam[1], date && date[1], gps && 'GPS', formatBytes(r.length)].filter(Boolean).join(' · ') }));
     } else if (it.type === 'mime' && /xmp|rdf\+xml/i.test(it.contentType)) {
@@ -201,6 +202,7 @@ export async function load(file) {
     doc.notes.push('This file has a C2PA manifest. Removing it would move image data, so only "keep" is possible.');
     doc.c2pa.noRemove = true;
   }
+  if (!doc.exif) doc.notes.push(NO_EXIF_NOTE);
   doc.notes.push(`${doc.format} files are view-only except for removing the EXIF location.`);
   doc.technical.push(['Container', `${doc.format} (brand ${brand.trim()})`]);
   if (width) doc.technical.push(['Dimensions', `${width}×${height}`]);

@@ -4,7 +4,7 @@
 import { readBytes, u16be, u32be, u32le, fourcc, fourccBytes, concat, formatBytes, crc32, u32beBytes, u32leBytes } from './bytes.js';
 import { decodeLatin1, decodeUtf8, decodeUtf8OrLatin1, decodeUtf16be, encodeUtf8, encodeLatin1, isLatin1 } from './text.js';
 import { makeField, isChanged } from './fields.js';
-import { parseTiff, exifRows, gpsSummary, removeGps } from './tiff.js';
+import { parseTiff, exifRows, gpsSummary, removeGps, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -79,6 +79,7 @@ function exifFields(doc, tiffBytes, where, group) {
   }
   const cam = rows.find((r) => r[0] === 'Camera');
   const date = rows.find((r) => r[0] === 'Date taken');
+  if (!cam && !date && !gps) doc.notes.push(STRIPPED_NOTE);
   return [cam && cam[1], date && date[1], gps ? 'GPS' : null].filter(Boolean).join(' · ') || `${formatBytes(tiffBytes.length)}`;
 }
 
@@ -217,6 +218,7 @@ async function loadJpeg(file) {
   if (sof) doc.technical.push(['Dimensions', `${sof.width}×${sof.height}`], ['Coding', `${sof.kind}, ${sof.bits}-bit`], ['Components', String(sof.comps)]);
   const kinds = [doc.segs.some((s) => s.exif) && 'EXIF', doc.segs.some((s) => s.field && s.field.label === 'XMP') && 'XMP', icc.length && 'ICC', doc.c2pa && 'C2PA', doc.mpf && 'MPF'].filter(Boolean);
   doc.technical.push(['Metadata', kinds.join(', ') || 'none']);
+  if (!doc.sections.some((s) => s.title.startsWith('EXIF'))) doc.notes.push(NO_EXIF_NOTE);
   doc.summary = `JPEG${sof ? ` · ${sof.width}×${sof.height}` : ''}${kinds.length ? ' · ' + kinds.join(', ') : ''}`;
   return doc;
 }
@@ -379,6 +381,7 @@ async function loadPng(file) {
     ['Colour', `${COLOR_TYPES[ihdr.color] || ihdr.color}, ${ihdr.bits}-bit`], ['Interlaced', ihdr.interlace ? 'Adam7' : 'no']);
   const kinds = [...new Set(doc.chunks.filter((c) => ['tEXt', 'iTXt', 'zTXt', 'eXIf', 'iCCP', 'caBX'].includes(c.type)).map((c) => ({ eXIf: 'EXIF', iCCP: 'ICC', caBX: 'C2PA' }[c.type] || 'text')))];
   doc.technical.push(['Metadata', kinds.join(', ') || 'none']);
+  if (!doc.sections.some((s) => s.title.startsWith('EXIF'))) doc.notes.push(NO_EXIF_NOTE);
   doc.summary = `PNG · ${ihdr.width}×${ihdr.height}${kinds.length ? ' · ' + kinds.join(', ') : ''}`;
   return doc;
 }
@@ -492,6 +495,7 @@ async function loadWebp(file) {
   doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
   const kinds = ['EXIF', 'XMP ', 'ICCP'].filter((k) => doc.chunks.some((c) => c.id === k)).map((k) => (k === 'ICCP' ? 'ICC' : k.trim()));
   doc.technical.push(['Container', 'WebP'], ['Dimensions', dims ? `${dims.w}×${dims.h}` : 'unknown'], ['Coding', kind + (doc.chunks.some((c) => c.id === 'ANIM') ? ', animated' : '')], ['Metadata', kinds.join(', ') || 'none']);
+  if (!doc.sections.some((s) => s.title.startsWith('EXIF'))) doc.notes.push(NO_EXIF_NOTE);
   doc.summary = `WebP${dims ? ` · ${dims.w}×${dims.h}` : ''}${kinds.length ? ' · ' + kinds.join(', ') : ''}`;
   return doc;
 }

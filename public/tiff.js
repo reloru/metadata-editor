@@ -91,6 +91,9 @@ function dms(v, ref) {
   return `${deg.toFixed(6)}° ${ref || ''}`.trim();
 }
 
+export const STRIPPED_NOTE = 'This file’s EXIF has no camera, date or location. The image was likely re-saved or shared in a way that removes them; the original photo may still have them.';
+export const NO_EXIF_NOTE = 'No EXIF in this file: no camera, date or location data.';
+
 export function gpsSummary(t) {
   const g = t.gps;
   if (!g || !g.entries.size) return null;
