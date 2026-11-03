@@ -1,7 +1,7 @@
 // JPEG (ITU-T T.81, JFIF, EXIF, CIPA DC-007 MPF) and PNG (ISO/IEC 15948, PNG 3rd ed.) metadata:
 // view, delete segments/chunks, remove location, edit comments and text chunks.
 
-import { readBytes, u16be, u32be, fourcc, fourccBytes, concat, formatBytes, crc32, u32beBytes } from './bytes.js';
+import { readBytes, u16be, u32be, u32le, fourcc, fourccBytes, concat, formatBytes, crc32, u32beBytes, u32leBytes } from './bytes.js';
 import { decodeLatin1, decodeUtf8, decodeUtf8OrLatin1, decodeUtf16be, encodeUtf8, encodeLatin1, isLatin1 } from './text.js';
 import { makeField, isChanged } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps } from './tiff.js';
@@ -10,11 +10,13 @@ const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 export function detect(head) {
   if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return true;
+  if (head.length >= 12 && fourcc(head, 0) === 'RIFF' && fourcc(head, 8) === 'WEBP') return true;
   return head.length >= 8 && PNG_SIG.every((x, i) => head[i] === x);
 }
 
 export async function load(file) {
-  const head = await readBytes(file, 0, 8);
+  const head = await readBytes(file, 0, 12);
+  if (fourcc(head, 0) === 'RIFF') return loadWebp(file);
   return head[0] === 0xff ? loadJpeg(file) : loadPng(file);
 }
 
@@ -428,9 +430,105 @@ function buildPng(doc, removeC2pa) {
   return parts;
 }
 
+// ---- WebP (RIFF container, VP8X extended format) ----
+
+const WEBP_FLAGS = { ICCP: 0x20, EXIF: 0x08, 'XMP ': 0x04 };
+
+async function loadWebp(file) {
+  const doc = { format: 'WebP', file, fields: [], technical: [], notes: [], sections: [], c2pa: null, readOnly: null, chunks: [], gpsField: null };
+  const head = await readBytes(file, 0, 12);
+  const riffEnd = Math.min(file.size, 8 + u32le(head, 4));
+  let o = 12;
+  let dims = null;
+  let kind = 'lossy';
+  while (o + 8 <= riffEnd) {
+    const h = await readBytes(file, o, o + 8);
+    const id = fourcc(h, 0);
+    const size = u32le(h, 4);
+    const end = o + 8 + size + (size & 1);
+    if (o + 8 + size > file.size) throw new Error('WebP chunk exceeds file size');
+    const c = { id, start: o, size, end: Math.min(end, file.size) };
+    doc.chunks.push(c);
+    const sz = formatBytes(size);
+    if (id === 'VP8X') {
+      const d = await readBytes(file, o + 8, o + 8 + 10);
+      c.flags = d[0];
+      dims = { w: 1 + (d[4] | (d[5] << 8) | (d[6] << 16)), h: 1 + (d[7] | (d[8] << 8) | (d[9] << 16)) };
+      c.field = makeField({ cls: 'protected', kind: 'info', key: id, label: 'Extended header (VP8X)', display: `${dims.w}×${dims.h}`, deletable: false });
+    } else if (id === 'EXIF') {
+      let d = await readBytes(file, o + 8, o + 8 + size);
+      c.tiffAt = startsWith(d, 'Exif\0\0') ? 6 : 0;
+      c.data = d;
+      d = d.subarray(c.tiffAt);
+      c.field = makeField({ cls: 'preserve', kind: 'info', key: id, label: 'EXIF', display: exifFields(doc, d, 'EXIF chunk', null), chunk: c, note: null });
+      if (doc.gpsField) doc.gpsField.chunk = c;
+    } else if (id === 'XMP ') {
+      c.field = xmpField(doc, decodeUtf8(await readBytes(file, o + 8, o + 8 + size)), 'XMP', { key: 'XMP', chunk: c });
+    } else if (id === 'ICCP') {
+      const d = await readBytes(file, o + 8, o + 8 + size);
+      const desc = iccDescription(d);
+      c.field = makeField({ cls: 'preserve', kind: 'info', key: id, label: 'ICC colour profile', display: `${desc ? desc + ' · ' : ''}${sz} · deleting changes how colours display`, chunk: c });
+    } else if (id === 'VP8 ' || id === 'VP8L') {
+      kind = id === 'VP8L' ? 'lossless' : 'lossy';
+      if (!dims) {
+        const d = await readBytes(file, o + 8, o + 8 + 10);
+        dims = id === 'VP8L'
+          ? { w: 1 + (((d[2] << 8) | d[1]) & 0x3fff), h: 1 + ((((d[4] << 16) | (d[3] << 8) | d[2]) >> 6) & 0x3fff) }
+          : { w: (d[6] | (d[7] << 8)) & 0x3fff, h: (d[8] | (d[9] << 8)) & 0x3fff };
+      }
+      c.field = makeField({ cls: 'protected', kind: 'info', key: id, label: `Image data (${id.trim()}, ${kind})`, display: sz, deletable: false });
+    } else if (id === 'ANIM' || id === 'ANMF' || id === 'ALPH') {
+      if (id !== 'ANMF' || !doc.chunks.some((x) => x.id === 'ANMF' && x !== c)) c.field = makeField({ cls: 'protected', kind: 'info', key: id, label: { ANIM: 'Animation (ANIM)', ANMF: 'Animation frames (ANMF)', ALPH: 'Alpha (ALPH)' }[id], display: sz, deletable: false });
+    } else {
+      c.field = makeField({ cls: 'preserve', kind: 'info', key: id, label: `Chunk '${id}'`, display: sz, chunk: c });
+    }
+    o = end;
+  }
+  if (o < file.size) {
+    doc.trailingStart = o;
+    doc.trailingField = makeField({ cls: 'preserve', kind: 'info', key: 'trailing', label: 'Data after RIFF chunk', display: formatBytes(file.size - o) });
+  }
+  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
+  const kinds = ['EXIF', 'XMP ', 'ICCP'].filter((k) => doc.chunks.some((c) => c.id === k)).map((k) => (k === 'ICCP' ? 'ICC' : k.trim()));
+  doc.technical.push(['Container', 'WebP'], ['Dimensions', dims ? `${dims.w}×${dims.h}` : 'unknown'], ['Coding', kind + (doc.chunks.some((c) => c.id === 'ANIM') ? ', animated' : '')], ['Metadata', kinds.join(', ') || 'none']);
+  doc.summary = `WebP${dims ? ` · ${dims.w}×${dims.h}` : ''}${kinds.length ? ' · ' + kinds.join(', ') : ''}`;
+  return doc;
+}
+
+function buildWebp(doc) {
+  const body = [];
+  const gpsOff = doc.gpsField && doc.gpsField.deleted;
+  const gone = new Set(doc.chunks.filter((c) => c.field && c.field.deleted).map((c) => c.id));
+  for (const c of doc.chunks) {
+    if (c.field && c.field.deleted) continue;
+    if (c.id === 'VP8X') {
+      let flags = c.flags;
+      for (const [id, bit] of Object.entries(WEBP_FLAGS)) if (gone.has(id) && !doc.chunks.some((x) => x.id === id && !(x.field && x.field.deleted))) flags &= ~bit;
+      if (flags !== c.flags) {
+        body.push(concat([fourccBytes('VP8X'), u32leBytes(c.size), new Uint8Array([flags])]), doc.file.slice(c.start + 9, c.end));
+        continue;
+      }
+    }
+    if (c.id === 'EXIF' && gpsOff && doc.gpsField.chunk === c) {
+      const t = removeGps(c.data.subarray(c.tiffAt));
+      if (t) {
+        body.push(concat([fourccBytes('EXIF'), u32leBytes(c.size), c.data.subarray(0, c.tiffAt), t, c.size & 1 ? new Uint8Array(1) : new Uint8Array(0)]));
+        continue;
+      }
+    }
+    body.push(doc.file.slice(c.start, c.end));
+  }
+  let size = 4;
+  for (const p of body) size += p.byteLength !== undefined ? p.byteLength : p.size;
+  const parts = [concat([fourccBytes('RIFF'), u32leBytes(size), fourccBytes('WEBP')]), ...body];
+  if (doc.trailingStart !== undefined && !(doc.trailingField && doc.trailingField.deleted)) parts.push(doc.file.slice(doc.trailingStart));
+  return parts;
+}
+
 // ---- module interface ----
 
 export function addable(doc) {
+  if (doc.format === 'WebP') return [];
   if (doc.format === 'JPEG') {
     const has = doc.fields.some((f) => f.key === 'COM' && !f.deleted) || doc.newComments.some((f) => !f.deleted);
     return has ? [] : [{ key: 'COM', label: 'Comment (COM)' }];
@@ -464,6 +562,7 @@ export function removeNewField(doc, f) {
 
 export async function build(doc, opts = {}) {
   const removeC2pa = !!opts.removeC2pa;
+  if (doc.format === 'WebP') return buildWebp(doc);
   return doc.format === 'JPEG' ? buildJpeg(doc, removeC2pa) : buildPng(doc, removeC2pa);
 }
 

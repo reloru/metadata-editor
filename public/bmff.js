@@ -425,7 +425,7 @@ export function detect(head) {
 export async function load(file) {
   const doc = {
     format: 'MP4', file, fields: [], technical: [], notes: [], c2pa: null, readOnly: null,
-    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null, udtaLocations: [],
+    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null, udtaLocations: [], qtList: [],
   };
   let o = 0;
   let brands = null;
@@ -526,9 +526,10 @@ export async function load(file) {
   const sizeOf = (n) => formatBytes(n.size);
   const keysMetaField = (node, where) => {
     const q = node.children ? qtKeys(buf, node) : null;
-    if (q && !doc.qt) {
-      doc.qt = q;
-      doc.sections = [{ title: 'QuickTime metadata (keys)', rows: q.items.map((it) => [it.key.replace(/^com\.apple\.quicktime\./, ''), it.value]) }];
+    if (q) {
+      doc.qtList.push(q);
+      doc.sections = doc.sections || [];
+      doc.sections.push({ title: `QuickTime metadata (${where} keys)`, rows: q.items.map((it) => [it.key.replace(/^com\.apple\.quicktime\./, ''), it.value]) });
     }
     return makeField({ cls: 'preserve', kind: 'info', key: 'meta', label: `QuickTime metadata (${where} keys)`, node,
       display: q ? `${q.items.length} items${q.items.some((it) => LOCATION_KEY.test(it.key)) ? ', includes location' : ''} · ${sizeOf(node)}` : sizeOf(node) });
@@ -564,7 +565,7 @@ export async function load(file) {
     }
   }
   doc.moovFields = moovFields;
-  const qtLoc = doc.qt ? doc.qt.items.filter((it) => LOCATION_KEY.test(it.key)) : [];
+  const qtLoc = doc.qtList.flatMap((q) => q.items.filter((it) => LOCATION_KEY.test(it.key)));
   if (qtLoc.length || doc.udtaLocations.length) {
     const iso = qtLoc.find((it) => /ISO6709$/.test(it.key));
     doc.locationField = makeField({ cls: 'edit', kind: 'readonly', key: 'location', label: 'Location', value: '',
@@ -723,7 +724,9 @@ export async function build(doc, opts = {}) {
   for (const f of doc.moovFields) if (f.node && f.deleted) replace(f.node, null);
   if (doc.locationField && doc.locationField.deleted) {
     for (const l of doc.udtaLocations) if (!ctx.replace.has(l.node)) replace(l.node, null);
-    if (doc.qt && !ctx.replace.has(doc.qt.meta)) replace(doc.qt.meta, rebuildQtMeta(buf, doc.qt, (k) => !LOCATION_KEY.test(k)));
+    for (const q of doc.qtList) {
+      if (q.names.some((k) => LOCATION_KEY.test(k)) && !ctx.replace.has(q.meta)) replace(q.meta, rebuildQtMeta(buf, q, (k) => !LOCATION_KEY.test(k)));
+    }
   }
 
   if (doc.ilstFields.some(isChanged)) {

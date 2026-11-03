@@ -163,3 +163,34 @@ test('JPEG XMP property extraction ignores namespace declarations', async () => 
   assert.deepEqual(x.rows, [['dc:format', 'image/jpeg'], ['dc:title', 'Hello']]);
   assert.equal(x.hasGps, false);
 });
+
+function webpChunk(id, d) {
+  return F.concat([latin1(id), F.u32le(d.length), d, d.length & 1 ? new Uint8Array(1) : new Uint8Array(0)]);
+}
+function webpFixture() {
+  const vp8x = webpChunk('VP8X', new Uint8Array([0x2c, 0, 0, 0, 63, 0, 0, 47, 0, 0]));
+  const vp8 = webpChunk('VP8 ', F.concat([new Uint8Array([0, 0, 0, 0x9d, 0x01, 0x2a, 64, 0, 48, 0]), F.prng(90, 301)]));
+  const body = F.concat([latin1('WEBP'), vp8x, webpChunk('ICCP', new Uint8Array(132)), vp8, webpChunk('EXIF', F.tiffWithGps()), webpChunk('XMP ', F.enc.encode('<x:xmpmeta/>'))]);
+  return F.concat([latin1('RIFF'), F.u32le(body.length), body]);
+}
+
+test('WebP: EXIF/XMP/ICC read; location removed in place; deleting chunks clears VP8X flags and fixes the RIFF size', async () => {
+  const before = webpFixture();
+  const doc = await open(before);
+  assert.equal(doc.format, 'WebP');
+  assert.equal(Object.fromEntries(doc.technical).Dimensions, '64×48');
+  assert.deepEqual(doc.sections[0].rows.find((r) => r[0] === 'Camera'), ['Camera', 'Apple']);
+  find(doc, 'GPS').deleted = true;
+  const out1 = await save(doc);
+  assert.equal(out1.length, before.length);
+  assert.equal((await open(out1)).fields.find((f) => f.key === 'GPS'), undefined);
+  const d2 = await open(before);
+  find(d2, 'XMP').deleted = true;
+  find(d2, 'ICCP').deleted = true;
+  const out2 = await save(d2);
+  assert.equal(((out2[4] | (out2[5] << 8) | (out2[6] << 16) | (out2[7] << 24)) >>> 0) + 8, out2.length);
+  assert.equal(out2[20], 0x08, 'only the EXIF flag remains');
+  const re = await open(out2);
+  assert.equal(Object.fromEntries(re.technical).Metadata, 'EXIF');
+  assert.deepEqual(await save(await open(before)), before);
+});
