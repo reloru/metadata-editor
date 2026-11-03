@@ -8,6 +8,9 @@ import { makeField } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps, gpsWithin, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 import { xmpInfo } from './image.js';
 import { exifTagFields, exifAddable, newExifField, exifChanged, writeExifParts } from './exifedit.js';
+import { xmpFields, xmpAddable, newXmpField, writeXmp, GPS_PROPS } from './xmpedit.js';
+import { photoInfoFields, effectiveFields } from './photoinfo.js';
+import { makeField as mk } from './fields.js';
 
 const HEAD = 4 * 1048576;
 
@@ -45,13 +48,16 @@ export async function load(file) {
     display: [cam && cam[1], date && date[1], gps ? 'GPS' : null].filter(Boolean).join(' · ') || 'basic tags only' }));
   const xe = t.ifd0.entries.get(0x02bc);
   if (xe && xe.at + xe.size <= head.length) {
-    const x = xmpInfo(decodeUtf8(head.subarray(xe.at, xe.at + xe.size)));
+    const xml = decodeUtf8(head.subarray(xe.at, xe.at + xe.size)).replace(/\0+$/, '');
+    const x = xmpInfo(xml);
     doc.sections.push({ title: 'XMP', rows: x.rows.length ? x.rows : [['', 'No simple properties']] });
-    if (x.hasGps) doc.notes.push('XMP also records a location, which this app cannot remove from TIFF/DNG files.');
+    try { doc.xmpEdit = { xml, fields: xmpFields(xml, 'XMP'), type: xe.type }; } catch { /* view only */ }
+    if (x.hasGps) doc.notes.push('XMP also records a location; Remove location removes it there too.');
     fields.push(makeField({ cls: 'protected', kind: 'info', key: 'XMP', label: 'XMP', deletable: false, display: `${x.rows.length} properties · ${formatBytes(xe.size)}` }));
   }
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'data', label: dng ? 'Raw image data and previews' : 'Image data', deletable: false, display: formatBytes(file.size) }));
   doc.otherFields = fields;
+  doc.photoInfo = photoInfoFields(doc);
   collect(doc);
   doc.notes.push(`${doc.format}: EXIF and descriptive tags can be edited; image tags and data are never touched.`);
   const w = t.ifd0.entries.get(0x100);
@@ -65,24 +71,40 @@ export async function load(file) {
 }
 
 function collect(doc) {
-  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...doc.otherFields];
+  doc.fields = [...(doc.photoInfo || []), ...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...(doc.xmpEdit ? doc.xmpEdit.fields : []), ...doc.otherFields];
 }
-export function addable(doc) { return doc.exifEdit ? exifAddable(doc.exifEdit.fields) : []; }
+export function addable(doc) {
+  return [...(doc.exifEdit ? exifAddable(doc.exifEdit.fields) : []), ...(doc.xmpEdit ? xmpAddable(doc.xmpEdit.fields) : [])];
+}
 export function addField(doc, key) {
-  const f = newExifField(key, 'EXIF');
-  doc.exifEdit.fields.push(f);
+  const xmp = key.startsWith('XMPPROP:');
+  const f = xmp ? newXmpField(key) : newExifField(key, 'EXIF');
+  (xmp ? doc.xmpEdit : doc.exifEdit).fields.push(f);
   collect(doc);
   return f;
 }
 export function removeNewField(doc, f) {
-  doc.exifEdit.fields.splice(doc.exifEdit.fields.indexOf(f), 1);
+  const list = (f.xmpProp ? doc.xmpEdit : doc.exifEdit).fields;
+  list.splice(list.indexOf(f), 1);
   collect(doc);
 }
 
 export async function build(doc) {
-  if (doc.exifEdit && exifChanged(doc.exifEdit.fields, null)) {
+  const eff = effectiveFields(doc);
+  const dropGps = !!(doc.gpsField && doc.gpsField.deleted);
+  const fields = eff.exif ? [...eff.exif] : [];
+  if (doc.xmpEdit) {
+    const xml = writeXmp(doc.xmpEdit.xml, eff.xmp, dropGps ? [GPS_PROPS] : []);
+    if (xml !== doc.xmpEdit.xml) {
+      // The XMP packet is TIFF tag 0x02BC: rewritten through the same append-only writer.
+      const f = mk({ exifTag: { ifd: 'ifd0', tag: 0x02bc, type: doc.xmpEdit.type }, value: doc.xmpEdit.xml });
+      f.value = xml;
+      fields.push(f);
+    }
+  }
+  if (exifChanged(fields, null)) {
     // New IFDs and values are appended at the end of the file (TIFF offsets are file offsets).
-    const { head, tail } = writeExifParts(doc.head, doc.exifEdit.fields, { dropGps: !!(doc.gpsField && doc.gpsField.deleted), appendAt: doc.file.size });
+    const { head, tail } = writeExifParts(doc.head, fields, { dropGps, appendAt: doc.file.size });
     return [head, doc.file.slice(head.length), tail];
   }
   if (!(doc.gpsField && doc.gpsField.deleted)) return [doc.file];

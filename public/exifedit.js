@@ -137,6 +137,10 @@ function encodeValue(le, type, tag, text) {
     const bytes = concat([s, new Uint8Array(1)]);
     return { type, count: bytes.length, bytes };
   }
+  if (tag === 0x02bc) {
+    const bytes = encodeUtf8(text);
+    return { type, count: bytes.length, bytes };
+  }
   if (type === 7) {
     let bytes;
     if (isLatin1(text) && /^[\x00-\x7f]*$/.test(text)) bytes = concat([new Uint8Array([65, 83, 67, 73, 73, 0, 0, 0]), encodeUtf8(text)]);

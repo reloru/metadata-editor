@@ -199,3 +199,13 @@ test('HEIC: EXIF edits go into an appended item; iloc patched; old item zeroed; 
   assert.equal(re.fields.find((f) => f.key === 'GPS'), undefined);
   assert.equal(Object.fromEntries(re.technical).Dimensions, '4032×3024');
 });
+
+test('HEIC: Photo info caption and date written to the EXIF item', async () => {
+  const doc = await open(heic());
+  find(doc, 'caption').value = 'From HEIC';
+  find(doc, 'taken').value = '2026-11-03 14:12:55 -06:00';
+  const re = await open(await save(doc));
+  assert.equal(find(re, 'ImageDescription').value, 'From HEIC');
+  assert.equal(find(re, 'DateTimeOriginal').value, '2026:11:03 14:12:55');
+  assert.equal(find(re, 'taken').value, '2026-11-03 14:12:55 -06:00');
+});

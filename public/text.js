@@ -152,3 +152,14 @@ export function validateMp4Day(v) {
 export function validateLang(v) {
   return v.length === 3 && isLatin1(v) ? null : '3-letter ISO 639-2 code (e.g. eng)';
 }
+
+// Decode XML character references and the five predefined entities.
+export function xmlText(s) {
+  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    }
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e];
+  });
+}

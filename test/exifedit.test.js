@@ -90,3 +90,60 @@ test('PNG and WebP: EXIF tag edits round-trip', async () => {
     assert.equal(find(re, 'Make').value, 'PNG edit');
   }
 });
+
+const APPLE_XMP = `<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 6.0.0"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/" xmlns:exif="http://ns.adobe.com/exif/1.0/">
+   <xmp:CreateDate>2026-11-12T11:51:00</xmp:CreateDate>
+   <photoshop:DateCreated>2026-11-12T11:51:00+10:30</photoshop:DateCreated>
+   <exif:GPSLatitude>29,56.1N</exif:GPSLatitude>
+  </rdf:Description>
+ </rdf:RDF></x:xmpmeta>`;
+
+export function appleJpeg() {
+  const exif = F.jpegSeg(0xe1, F.concat([latin1('Exif\0\0'), F.tiffWithGps()]));
+  const xmp = F.jpegSeg(0xe1, F.concat([latin1('http://ns.adobe.com/xap/1.0/\0'), F.enc.encode(APPLE_XMP)]));
+  const sof = F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be16(8), be16(8), new Uint8Array([1, 1, 0x11, 0])]));
+  return F.concat([new Uint8Array([0xff, 0xd8]), exif, xmp, sof, F.JPEG_SCAN]);
+}
+
+test('Photo info: caption, keywords and date written to every EXIF and XMP copy; XMP fields editable', async () => {
+  const doc = await open(appleJpeg());
+  const cap = find(doc, 'caption');
+  const kw = find(doc, 'keywords');
+  const taken = find(doc, 'taken');
+  assert.equal(taken.value, '2024-05-06 07:08:09');
+  cap.value = 'Beach & sun <3';
+  kw.value = 'Claude\nTravel';
+  taken.value = '2026-11-03 14:12:55 -06:00';
+  find(doc, 'xmp:CreateDate').deleted = false;
+  const out = await save(doc);
+  const re = await open(out);
+  assert.equal(find(re, 'ImageDescription').value, 'Beach & sun <3');
+  assert.equal(find(re, 'dc:description').value, 'Beach & sun <3');
+  assert.equal(find(re, 'dc:subject').value, 'Claude\nTravel');
+  assert.equal(find(re, 'DateTimeOriginal').value, '2026:11:03 14:12:55');
+  assert.equal(find(re, 'OffsetTimeOriginal').value, '-06:00');
+  assert.equal(find(re, 'photoshop:DateCreated').value, '2026-11-03T14:12:55-06:00');
+  assert.equal(find(re, 'xmp:CreateDate').value, '2026-11-03T14:12:55-06:00');
+  assert.equal(find(re, 'caption').value, 'Beach & sun <3');
+  assert.equal(find(re, 'taken').value, '2026-11-03 14:12:55 -06:00');
+  // Remove location also removes XMP GPS properties.
+  find(re, 'GPS').deleted = true;
+  const re2 = await open(await save(re));
+  assert.equal(re2.fields.find((f) => f.key === 'exif:GPSLatitude'), undefined);
+  assert.equal(re2.fields.find((f) => f.key === 'GPS'), undefined);
+});
+
+test('Photo info: reverting the caption restores everything; clearing it removes all copies', async () => {
+  const doc = await open(appleJpeg());
+  const cap = find(doc, 'caption');
+  cap.value = 'x';
+  cap.value = '';
+  assert.deepEqual(await save(doc), appleJpeg(), 'reverted to original value: no change');
+  cap.value = 'temp';
+  const re = await open(await save(doc));
+  find(re, 'caption').deleted = true;
+  const re2 = await open(await save(re));
+  assert.equal(re2.fields.find((f) => f.key === 'ImageDescription'), undefined);
+  assert.equal(re2.fields.find((f) => f.key === 'dc:description'), undefined);
+});
