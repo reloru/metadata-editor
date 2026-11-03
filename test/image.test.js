@@ -239,3 +239,42 @@ test('JPEG MPF: GPS in an extra image is found and removed in place along with t
   assert.match(re.fields.find((f) => f.key === 'MPF').display, /EXIF, no location/);
   assert.deepEqual(re.sections[0].rows.find((r) => r[0] === 'Camera'), ['Camera', 'Apple']);
 });
+
+// Little-endian DNG-like TIFF: IFD0 (Make, DNGVersion, Exif ptr, GPS ptr), Exif (DateTimeOriginal + offset),
+// GPS (lat/lon + GPSTimeStamp + GPSDateStamp two weeks before Date taken).
+function dngFixture() {
+  const le16 = (v) => new Uint8Array([v & 255, v >> 8]);
+  const le32 = F.u32le;
+  const ent = (tag, type, count, value) => F.concat([le16(tag), le16(type), le32(count), value]);
+  const rat = (n, d) => F.concat([le32(n), le32(d)]);
+  // Layout: 8 header | IFD0 @8 (4 entries: 2+48+4=54) -> 62 | Exif @62 (2 entries: 2+24+4=30) -> 92 | GPS @92 (6 entries: 2+72+4=78) -> 170 | data @170
+  const ifd0 = F.concat([le16(4), ent(0x010f, 2, 6, le32(170)), ent(0x8769, 4, 1, le32(62)), ent(0x8825, 4, 1, le32(92)), ent(0xc612, 1, 4, new Uint8Array([1, 6, 0, 0])), le32(0)]);
+  const exif = F.concat([le16(2), ent(0x9003, 2, 20, le32(176)), ent(0x9011, 2, 7, le32(196)), le32(0)]);
+  const gps = F.concat([le16(6), ent(1, 2, 2, latin1('N\0\0\0')), ent(2, 5, 3, le32(203)), ent(3, 2, 2, latin1('W\0\0\0')), ent(4, 5, 3, le32(227)), ent(7, 5, 3, le32(251)), ent(0x1d, 2, 11, le32(275)), le32(0)]);
+  const data = F.concat([latin1('Apple\0'), latin1('2026:11:18 12:14:00\0'), latin1('-08:00\0'), rat(29, 1), rat(39, 1), rat(1053, 100), rat(95, 1), rat(16, 1), rat(3581, 100), rat(20, 1), rat(22, 1), rat(27, 1), latin1('2026:11:03\0')]);
+  return F.concat([latin1('II'), le16(42), le32(8), ifd0, exif, gps, data, F.prng(99, 5000)]);
+}
+
+test('DNG/TIFF: opened by content; GPS removed in place; GPS time that disagrees with Date taken is flagged', async () => {
+  const before = dngFixture();
+  const doc = await open(before);
+  assert.equal(doc.format, 'DNG');
+  assert.equal(Object.fromEntries(doc.technical)['DNG version'], '1.6.0.0');
+  assert.match(find(doc, 'GPS').display, /^29\.652925° N, 95\.276614° W · 2026:11:03 20:22:27 UTC$/);
+  assert.ok(doc.notes.some((n) => /GPS timestamp \(2026-11-03 20:22:27 UTC\) does not match Date taken/.test(n)));
+  find(doc, 'GPS').deleted = true;
+  const out = await save(doc);
+  assert.equal(out.length, before.length);
+  assert.deepEqual(out.subarray(400), before.subarray(400), 'image data untouched');
+  const re = await open(out);
+  assert.equal(re.fields.find((f) => f.key === 'GPS'), undefined);
+  assert.ok(!re.notes.some((n) => /GPS timestamp/.test(n)));
+  assert.deepEqual(re.sections[0].rows.find((r) => r[0] === 'Camera'), ['Camera', 'Apple']);
+});
+
+test('JPEG: ISO 21496-1 gain map APP2 is labelled', async () => {
+  const be = (v) => F.u16be(v);
+  const jpg = F.concat([new Uint8Array([0xff, 0xd8]), F.jpegSeg(0xe2, F.concat([latin1('urn:iso:std:iso:ts:21496:-1\0'), new Uint8Array(8)])),
+    F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be(8), be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
+  assert.equal((await open(jpg)).fields.find((f) => f.key === 'APP2').label, 'Gain map info (ISO 21496-1)');
+});
