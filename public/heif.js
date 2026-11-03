@@ -8,6 +8,9 @@ import { makeField } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 import { exifTagFields, exifAddable, newExifField, exifChanged, writeExif } from './exifedit.js';
 import { concat } from './bytes.js';
+import { xmpFields, xmpAddable, newXmpField, writeXmp, GPS_PROPS } from './xmpedit.js';
+import { photoInfoFields, effectiveFields } from './photoinfo.js';
+import { encodeUtf8 } from './text.js';
 import { xmpInfo } from './image.js';
 import { C2PA_BMFF_UUID, jumbfFromBmffUuidPayload } from './c2pa.js';
 
@@ -194,9 +197,15 @@ export async function load(file) {
     } else if (it.type === 'mime' && /xmp|rdf\+xml/i.test(it.contentType)) {
       const r = await readItem(it);
       if (!r) continue;
-      const x = xmpInfo(decodeUtf8(r.data));
+      const xml = decodeUtf8(r.data);
+      const x = xmpInfo(xml);
       doc.sections.push({ title: 'XMP', rows: x.rows.length ? x.rows : [['', 'No simple properties']] });
-      if (x.hasGps) doc.notes.push('XMP also records a location, which this app cannot remove from HEIF files.');
+      const loc = locs.get(it.id);
+      const editable = loc.extents.length === 1 && loc.offSize >= 4 && loc.lenSize >= 4;
+      if (!doc.xmpEdit) {
+        try { doc.xmpEdit = { xml, fields: xmpFields(xml, 'XMP', { readOnly: !editable }), readOnly: !editable, item: r, loc }; } catch { /* view only */ }
+      }
+      if (x.hasGps) doc.notes.push('XMP also records a location; Remove location removes it there too.');
       fields.push(makeField({ cls: 'preserve', kind: 'info', key: 'XMP', label: 'XMP', deletable: false, display: `${x.rows.length} properties · ${formatBytes(r.length)}` }));
     }
   }
@@ -208,13 +217,14 @@ export async function load(file) {
     fields.push(makeField({ cls: 'protected', kind: 'info', key: b.type, label: b.type === 'mdat' ? 'Media data (mdat)' : b.type === 'ftyp' ? `File type (${brand})` : `Box '${b.type}'`, deletable: false, display: formatBytes(b.size) }));
   }
   doc.otherFields = fields;
+  doc.photoInfo = photoInfoFields(doc);
   collect(doc);
   if (doc.c2pa) {
     doc.notes.push('This file has a C2PA manifest. Removing it would move image data, so only "keep" is possible.');
     doc.c2pa.noRemove = true;
   }
   if (!doc.exif) doc.notes.push(NO_EXIF_NOTE);
-  if (doc.exifEdit && !doc.exifEdit.readOnly) doc.notes.push(`${doc.format}: EXIF can be edited; XMP is view-only for now. Image data is never touched.`);
+  if (doc.exifEdit && !doc.exifEdit.readOnly) doc.notes.push(`${doc.format}: EXIF and XMP can be edited. Image data is never touched.`);
   else doc.notes.push(doc.gpsField ? `${doc.format} files are view-only except for removing the EXIF location.` : `${doc.format} files are view-only. This file has no EXIF location.`);
   doc.technical.push(['Container', `${doc.format} (brand ${brand.trim()})`]);
   if (width) doc.technical.push(['Dimensions', `${width}×${height}`]);
@@ -224,20 +234,22 @@ export async function load(file) {
 }
 
 function collect(doc) {
-  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...doc.otherFields];
+  doc.fields = [...(doc.photoInfo || []), ...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...(doc.xmpEdit ? doc.xmpEdit.fields : []), ...doc.otherFields];
 }
 
 export function addable(doc) {
-  return doc.exifEdit && !doc.exifEdit.readOnly ? exifAddable(doc.exifEdit.fields) : [];
+  return [...(doc.exifEdit && !doc.exifEdit.readOnly ? exifAddable(doc.exifEdit.fields) : []), ...(doc.xmpEdit && !doc.xmpEdit.readOnly ? xmpAddable(doc.xmpEdit.fields) : [])];
 }
 export function addField(doc, key) {
-  const f = newExifField(key, 'EXIF');
-  doc.exifEdit.fields.push(f);
+  const xmp = key.startsWith('XMPPROP:');
+  const f = xmp ? newXmpField(key) : newExifField(key, 'EXIF');
+  (xmp ? doc.xmpEdit : doc.exifEdit).fields.push(f);
   collect(doc);
   return f;
 }
 export function removeNewField(doc, f) {
-  doc.exifEdit.fields.splice(doc.exifEdit.fields.indexOf(f), 1);
+  const list = (f.xmpProp ? doc.xmpEdit : doc.exifEdit).fields;
+  list.splice(list.indexOf(f), 1);
   collect(doc);
 }
 
@@ -249,22 +261,32 @@ function beBytes(v, n) {
 
 export async function build(doc, opts = {}) {
   if (opts.removeC2pa) throw new Error('The C2PA manifest cannot be removed from HEIF files here.');
-  const x = doc.exifEdit;
-  if (x && !x.readOnly && exifChanged(x.fields, null)) {
-    // Item data is addressed by absolute offsets: the edited EXIF goes into a new mdat at the end of the file,
-    // the item's iloc offset and length are patched in place, and the old item bytes are zeroed.
-    const { item, prefix, loc } = doc.exif;
-    const tiff = writeExif(doc.exif.tiff, x.fields, { dropGps: !!(doc.gpsField && doc.gpsField.deleted) });
-    const payload = concat([prefix, tiff]);
-    const at = doc.file.size + 8;
-    const ext = loc.extents[0];
-    const rel = at - loc.base;
-    if (rel > 2 ** (8 * loc.offSize) - 1 || payload.length > 2 ** (8 * loc.lenSize) - 1) throw new Error('File too large for the EXIF item location fields; nothing saved.');
-    const patches = [
-      { pos: doc.metaStart + ext.offPos, bytes: beBytes(rel, loc.offSize) },
-      { pos: doc.metaStart + ext.lenPos, bytes: beBytes(payload.length, loc.lenSize) },
-      { pos: item.offset, bytes: new Uint8Array(item.length) },
-    ].sort((a, b) => a.pos - b.pos);
+  // Item data is addressed by absolute offsets: edited items go into a new mdat at the end of the file, each
+  // item's iloc offset and length are patched in place, and the old item bytes are zeroed.
+  const eff = effectiveFields(doc);
+  const dropGps = !!(doc.gpsField && doc.gpsField.deleted);
+  const repl = [];
+  if (doc.exifEdit && !doc.exifEdit.readOnly && exifChanged(eff.exif, null)) {
+    const tiff = writeExif(doc.exif.tiff, eff.exif, { dropGps });
+    repl.push({ item: doc.exif.item, loc: doc.exif.loc, payload: concat([doc.exif.prefix, tiff]) });
+  }
+  if (doc.xmpEdit && !doc.xmpEdit.readOnly) {
+    const xml = writeXmp(doc.xmpEdit.xml, eff.xmp, dropGps ? [GPS_PROPS] : []);
+    if (xml !== doc.xmpEdit.xml) repl.push({ item: doc.xmpEdit.item, loc: doc.xmpEdit.loc, payload: encodeUtf8(xml) });
+  }
+  if (repl.length) {
+    const patches = [];
+    let at = doc.file.size + 8;
+    for (const r of repl) {
+      const ext = r.loc.extents[0];
+      const rel = at - r.loc.base;
+      if (rel > 2 ** (8 * r.loc.offSize) - 1 || r.payload.length > 2 ** (8 * r.loc.lenSize) - 1) throw new Error('File too large for the item location fields; nothing saved.');
+      patches.push({ pos: doc.metaStart + ext.offPos, bytes: beBytes(rel, r.loc.offSize) });
+      patches.push({ pos: doc.metaStart + ext.lenPos, bytes: beBytes(r.payload.length, r.loc.lenSize) });
+      patches.push({ pos: r.item.offset, bytes: new Uint8Array(r.item.length) });
+      at += r.payload.length;
+    }
+    patches.sort((a, b) => a.pos - b.pos);
     const parts = [];
     let p = 0;
     for (const q of patches) {
@@ -272,10 +294,11 @@ export async function build(doc, opts = {}) {
       p = q.pos + q.bytes.length;
     }
     parts.push(doc.file.slice(p));
+    const body = concat(repl.map((r) => r.payload));
     const mdat = new Uint8Array(8);
-    mdat.set(beBytes(payload.length + 8, 4), 0);
+    mdat.set(beBytes(body.length + 8, 4), 0);
     mdat.set([0x6d, 0x64, 0x61, 0x74], 4);
-    parts.push(mdat, payload);
+    parts.push(mdat, body);
     return parts;
   }
   if (!(doc.gpsField && doc.gpsField.deleted)) return [doc.file];

@@ -2,10 +2,13 @@
 // view, delete segments/chunks, remove location, edit comments and text chunks.
 
 import { readBytes, u16be, u32be, u32le, fourcc, fourccBytes, concat, formatBytes, crc32, u32beBytes, u32leBytes } from './bytes.js';
+import { xmlText } from './text.js';
 import { decodeLatin1, decodeUtf8, decodeUtf8OrLatin1, decodeUtf16be, encodeUtf8, encodeLatin1, isLatin1 } from './text.js';
 import { makeField, isChanged } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 import { exifTagFields, exifAddable, newExifField, exifChanged, writeExif } from './exifedit.js';
+import { xmpFields, xmpAddable, newXmpField, writeXmp, GPS_PROPS } from './xmpedit.js';
+import { photoInfoFields, effectiveFields } from './photoinfo.js';
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -29,16 +32,7 @@ function startsWith(b, s, o = 0) {
   return true;
 }
 
-// Decode XML character references and the five predefined entities.
-export function xmlText(s) {
-  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (m, e) => {
-    if (e[0] === '#') {
-      const n = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
-    }
-    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e];
-  });
-}
+export { xmlText };
 
 const XMP_SKIP = /^(xmlns|rdf|x|xml|stEvt|stRef):/;
 
@@ -100,10 +94,13 @@ function exifFields(doc, tiffBytes, where, group, opts = {}) {
   return [cam && cam[1], date && date[1], gps ? 'GPS' : null].filter(Boolean).join(' · ') || `${formatBytes(tiffBytes.length)}`;
 }
 
-function xmpField(doc, text, label, extra) {
+function xmpField(doc, text, label, extra, opts = {}) {
   const x = xmpInfo(text);
   doc.sections.push({ title: label, rows: x.rows.length ? x.rows : [['', 'No simple properties']] });
-  if (x.hasGps) doc.notes.push(`${label} also records a location; delete the ${label} block to remove it.`);
+  if (!doc.xmpEdit) {
+    try { doc.xmpEdit = { xml: text, fields: xmpFields(text, 'XMP', opts), readOnly: !!opts.readOnly, seg: extra.seg || null, chunk: extra.chunk || null }; } catch { /* listed via the block */ }
+  }
+  if (x.hasGps) doc.notes.push(`${label} also records a location; Remove location removes it there too.`);
   return makeField({ cls: 'preserve', kind: 'info', label, display: `${x.rows.length} properties${x.hasGps ? ', includes location' : ''} · ${formatBytes(text.length)}`, ...extra });
 }
 
@@ -170,7 +167,7 @@ async function loadJpeg(file) {
       if (first && doc.exifEdit) doc.exifEdit.seg = s;
       if (doc.gpsField) doc.gpsField.seg = s;
     } else if (m === 0xe1 && startsWith(d, 'http://ns.adobe.com/xap/1.0/\0')) {
-      s.field = xmpField(doc, decodeUtf8(d.subarray(29)), 'XMP', { key: 'APP1', seg: s, deletable: !afterMpf });
+      s.field = xmpField(doc, decodeUtf8(d.subarray(29)), 'XMP', { key: 'APP1', seg: s, deletable: !afterMpf }, { readOnly: afterMpf });
     } else if (m === 0xe1 && startsWith(d, 'http://ns.adobe.com/xmp/extension/\0')) {
       s.field = pf('Extended XMP', size);
     } else if (m === 0xe2 && startsWith(d, 'ICC_PROFILE\0')) {
@@ -248,8 +245,8 @@ async function loadJpeg(file) {
 
   doc.newComments = [];
   const fields = [];
-  if (doc.gpsField) fields.push(doc.gpsField);
-  if (doc.exifEdit) fields.push(...doc.exifEdit.fields);
+  doc.photoInfo = photoInfoFields(doc);
+  fields.push(...editFields(doc));
   for (const s of doc.segs) if (s.field) fields.push(s.field);
   if (tables.length) fields.push(makeField({ cls: 'protected', kind: 'info', key: 'tables', label: 'Image coding tables', display: tables.map((s) => markerName(s.marker)).join(', '), deletable: false }));
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'scan', label: 'Compressed image data', display: formatBytes(doc.file.size - doc.sosStart), deletable: false }));
@@ -303,9 +300,23 @@ function editedTiff(doc) {
   const x = doc.exifEdit;
   if (!x || x.readOnly) return null;
   const dropGps = !!(doc.gpsField && doc.gpsField.deleted && doc.gpsField.fromExifEdit);
+  const fields = effectiveFields(doc).exif;
   // Location removal on its own keeps the same-length in-place path.
-  if (!exifChanged(x.fields, null)) return null;
-  return writeExif(x.tiff, x.fields, { dropGps });
+  if (!exifChanged(fields, null)) return null;
+  return writeExif(x.tiff, fields, { dropGps });
+}
+
+// Rewritten XMP text for doc.xmpEdit, or null when unchanged.
+function editedXmp(doc) {
+  const x = doc.xmpEdit;
+  if (!x || x.readOnly) return null;
+  const drop = doc.gpsField && doc.gpsField.deleted ? [GPS_PROPS] : [];
+  const out = writeXmp(x.xml, effectiveFields(doc).xmp, drop);
+  return out === x.xml ? null : out;
+}
+
+function editFields(doc) {
+  return [...(doc.photoInfo || []), ...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...(doc.xmpEdit ? doc.xmpEdit.fields : [])];
 }
 
 function markerName(m) {
@@ -329,12 +340,19 @@ function buildJpeg(doc, removeC2pa) {
   const insert = () => { if (!inserted) { parts.push(...newComs); inserted = true; } };
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
   const tiff = editedTiff(doc);
+  const xmp = editedXmp(doc);
   for (const s of doc.segs) {
     if (s === doc.mpf) insert();
     const f = s.field;
     if (removeC2pa && doc.c2pa && doc.c2pa.segs.includes(s)) continue;
     if (s.jumbf && s.jumbf.deleted) continue;
     if (f && f.deleted) continue;
+    if (xmp !== null && doc.xmpEdit.seg === s) {
+      const body = concat([encodeLatin1('http://ns.adobe.com/xap/1.0/\0'), encodeUtf8(xmp)]);
+      if (body.length + 2 > 0xffff) throw new Error('XMP is too large for a JPEG segment (64 KB limit).');
+      parts.push(concat([new Uint8Array([0xff, 0xe1, (body.length + 2) >> 8, (body.length + 2) & 255]), body]));
+      continue;
+    }
     if (tiff && doc.exifEdit.seg === s) {
       const len = 2 + 6 + tiff.length;
       if (len > 0xffff) throw new Error('EXIF is too large for a JPEG segment (64 KB limit); shorten the edited text.');
@@ -480,6 +498,7 @@ async function loadPng(file) {
     doc.trailingStart = o;
     doc.trailingField = makeField({ cls: 'preserve', kind: 'info', key: 'trailing', label: 'Data after IEND', display: formatBytes(file.size - o) });
   }
+  doc.photoInfo = photoInfoFields(doc);
   collectPng(doc);
   doc.technical.push(['Container', frames ? 'PNG (animated)' : 'PNG'], ['Dimensions', `${ihdr.width}×${ihdr.height}`],
     ['Colour', `${COLOR_TYPES[ihdr.color] || ihdr.color}, ${ihdr.bits}-bit`], ['Interlaced', ihdr.interlace ? 'Adam7' : 'no']);
@@ -491,9 +510,7 @@ async function loadPng(file) {
 }
 
 function collectPng(doc) {
-  const out = [];
-  if (doc.gpsField) out.push(doc.gpsField);
-  if (doc.exifEdit) out.push(...doc.exifEdit.fields);
+  const out = [...editFields(doc)];
   for (const c of doc.chunks) if (c.field) out.push(c.field);
   out.push(...doc.newText);
   if (doc.trailingField) out.push(doc.trailingField);
@@ -516,6 +533,7 @@ function buildPng(doc, removeC2pa) {
   const parts = [Uint8Array.from(PNG_SIG)];
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
   const tiff = editedTiff(doc);
+  const xmp = editedXmp(doc);
   let inserted = false;
   for (const c of doc.chunks) {
     if (!inserted && c.type === 'IDAT') {
@@ -526,6 +544,7 @@ function buildPng(doc, removeC2pa) {
     if (removeC2pa && doc.c2pa && doc.c2pa.chunk === c) continue;
     if (f && f.deleted) continue;
     if (tiff && doc.exifEdit.chunk === c) { parts.push(pngChunk('eXIf', tiff)); continue; }
+    if (xmp !== null && doc.xmpEdit.chunk === c) { parts.push(textChunk('XML:com.adobe.xmp', xmp, { lang: '', tkw: '' })); continue; }
     if (c.type === 'eXIf' && gpsOff && doc.gpsField.chunk === c) {
       const t = removeGps(c.data);
       parts.push(t ? pngChunk('eXIf', t) : doc.file.slice(c.start, c.end));
@@ -601,6 +620,7 @@ async function loadWebp(file) {
     doc.trailingStart = o;
     doc.trailingField = makeField({ cls: 'preserve', kind: 'info', key: 'trailing', label: 'Data after RIFF chunk', display: formatBytes(file.size - o) });
   }
+  doc.photoInfo = photoInfoFields(doc);
   collectWebp(doc);
   const kinds = ['EXIF', 'XMP ', 'ICCP'].filter((k) => doc.chunks.some((c) => c.id === k)).map((k) => (k === 'ICCP' ? 'ICC' : k.trim()));
   doc.technical.push(['Container', 'WebP'], ['Dimensions', dims ? `${dims.w}×${dims.h}` : 'unknown'], ['Coding', kind + (doc.chunks.some((c) => c.id === 'ANIM') ? ', animated' : '')], ['Metadata', kinds.join(', ') || 'none']);
@@ -610,13 +630,14 @@ async function loadWebp(file) {
 }
 
 function collectWebp(doc) {
-  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
+  doc.fields = [...editFields(doc), ...doc.chunks.filter((c) => c.field).map((c) => c.field), ...(doc.trailingField ? [doc.trailingField] : [])];
 }
 
 function buildWebp(doc) {
   const body = [];
   const gpsOff = doc.gpsField && doc.gpsField.deleted;
   const tiff = editedTiff(doc);
+  const xmp = editedXmp(doc);
   const gone = new Set(doc.chunks.filter((c) => c.field && c.field.deleted).map((c) => c.id));
   for (const c of doc.chunks) {
     if (c.field && c.field.deleted) continue;
@@ -627,6 +648,11 @@ function buildWebp(doc) {
         body.push(concat([fourccBytes('VP8X'), u32leBytes(c.size), new Uint8Array([flags])]), doc.file.slice(c.start + 9, c.end));
         continue;
       }
+    }
+    if (xmp !== null && doc.xmpEdit.chunk === c) {
+      const data = encodeUtf8(xmp);
+      body.push(concat([fourccBytes('XMP '), u32leBytes(data.length), data, data.length & 1 ? new Uint8Array(1) : new Uint8Array(0)]));
+      continue;
     }
     if (tiff && doc.exifEdit.chunk === c) {
       const data = concat([c.data.subarray(0, c.tiffAt), tiff]);
@@ -651,8 +677,18 @@ function buildWebp(doc) {
 
 // ---- module interface ----
 
+function refreshFields(doc) {
+  if (doc.format === 'PNG') collectPng(doc);
+  else if (doc.format === 'WebP') collectWebp(doc);
+  else {
+    const edit = new Set(editFields(doc));
+    const rest = doc.fields.filter((f) => !edit.has(f) && !(f.exifTag || f.xmpProp || f.sync || f.key === 'GPS'));
+    doc.fields = [...editFields(doc), ...rest];
+  }
+}
+
 export function addable(doc) {
-  const exif = doc.exifEdit && !doc.exifEdit.readOnly ? exifAddable(doc.exifEdit.fields) : [];
+  const exif = [...(doc.exifEdit && !doc.exifEdit.readOnly ? exifAddable(doc.exifEdit.fields) : []), ...(doc.xmpEdit && !doc.xmpEdit.readOnly ? xmpAddable(doc.xmpEdit.fields) : [])];
   if (doc.format === 'WebP') return exif;
   if (doc.format === 'JPEG') {
     const has = doc.fields.some((f) => f.key === 'COM' && !f.deleted) || doc.newComments.some((f) => !f.deleted);
@@ -663,13 +699,11 @@ export function addable(doc) {
 }
 
 export function addField(doc, key) {
-  if (key.startsWith('EXIFTAG:')) {
-    const f = newExifField(key, 'EXIF');
-    const prev = doc.exifEdit.fields[doc.exifEdit.fields.length - 1];
-    doc.exifEdit.fields.push(f);
-    if (doc.format === 'JPEG') { const i = doc.fields.indexOf(prev); doc.fields.splice(i < 0 ? 0 : i + 1, 0, f); }
-    else if (doc.format === 'PNG') collectPng(doc);
-    else collectWebp(doc);
+  if (key.startsWith('EXIFTAG:') || key.startsWith('XMPPROP:')) {
+    const xmp = key.startsWith('XMPPROP:');
+    const f = xmp ? newXmpField(key) : newExifField(key, 'EXIF');
+    (xmp ? doc.xmpEdit : doc.exifEdit).fields.push(f);
+    refreshFields(doc);
     return f;
   }
   if (doc.format === 'JPEG') {
@@ -685,11 +719,10 @@ export function addField(doc, key) {
 }
 
 export function removeNewField(doc, f) {
-  if (f.exifTag) {
-    doc.exifEdit.fields.splice(doc.exifEdit.fields.indexOf(f), 1);
-    if (doc.format === 'JPEG') doc.fields.splice(doc.fields.indexOf(f), 1);
-    else if (doc.format === 'PNG') collectPng(doc);
-    else collectWebp(doc);
+  if (f.exifTag || f.xmpProp) {
+    const list = (f.exifTag ? doc.exifEdit : doc.xmpEdit).fields;
+    list.splice(list.indexOf(f), 1);
+    refreshFields(doc);
     return;
   }
   if (doc.format === 'JPEG') {

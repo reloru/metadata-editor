@@ -330,3 +330,11 @@ test('DNG/TIFF: EXIF edits appended at the end of the file; image data untouched
   assert.equal(find(re, 'DateTimeOriginal').value, '2026:11:03 14:12:55');
   assert.ok(find(re, 'GPS'));
 });
+
+test('DNG/TIFF: Photo info caption written to EXIF', async () => {
+  const doc = await open(dngFixture());
+  find(doc, 'caption').value = 'From DNG';
+  const re = await open(await save(doc));
+  assert.equal(find(re, 'ImageDescription').value, 'From DNG');
+  assert.equal(find(re, 'caption').value, 'From DNG');
+});
