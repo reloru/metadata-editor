@@ -110,7 +110,7 @@ test('MP4 udta text boxes (Apple date, 3GPP auth, QuickTime ©mak) and per-track
   assert.equal(Object.fromEntries(doc.technical)['Track 1'], 'vide · hvc1 (HEVC) · 1290×2796 · 30 fps average · 240 kbps · Core Media Video');
 });
 
-test('MOV: rotation from the tkhd matrix, timed-metadata key names, face-detection note', async () => {
+test('MOV: rotation from the tkhd matrix; face-detection track offered for removal', async () => {
   const matrix = concat([u32be(0), u32be(0x10000), u32be(0), u32be(0xffff0000), u32be(0), u32be(0), u32be(0), u32be(0), u32be(0x40000000)]);
   const tkhd = full('tkhd', 0, 3, new Uint8Array(36), matrix, new Uint8Array(8));
   const hdlrB = (t) => full('hdlr', 0, 0, u32be(0), latin1(t), new Uint8Array(13));
@@ -122,8 +122,8 @@ test('MOV: rotation from the tkhd matrix, timed-metadata key names, face-detecti
     bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), mebx), full('stco', 0, 0, u32be(0))))));
   const doc = await open(concat([bbox('ftyp', latin1('qt  '), u32be(0), latin1('qt  ')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), vtrak, mtrak), bbox('mdat', new Uint8Array(8))]));
   const tracks = doc.fields.filter((f) => f.key === 'trak').map((f) => [f.label, f.display]);
-  assert.deepEqual(tracks, [['Track (vide)', 'avc1, 1920×1080, rotated 90° (shows as 1080×1920)'], ['Track (timed metadata)', 'mebx, detected-face, detected-face.bounds']]);
-  assert.ok(doc.notes.some((n) => /face-detection metadata track/.test(n)));
+  assert.deepEqual(tracks, [['Track (vide)', 'avc1, 1920×1080, rotated 90° (shows as 1080×1920)']]);
+  assert.equal(find(doc, 'faces').deleteLabel, 'Remove face data');
 });
 
 test('M4A: iTunSMPB gapless info decoded; JPEG APP10 AROT labelled', async () => {
@@ -136,4 +136,40 @@ test('M4A: iTunSMPB gapless info decoded; JPEG APP10 AROT labelled', async () =>
   assert.equal(Object.fromEntries(doc.technical)['Gapless (iTunSMPB)'], '2048 samples delay, 651 samples padding, 2819445 samples');
   const jpg = concat([new Uint8Array([0xff, 0xd8]), F.jpegSeg(0xea, concat([latin1('AROT'), new Uint8Array(20)])), F.jpegSeg(0xc0, concat([new Uint8Array([8]), u16be(8), u16be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
   assert.equal((await open(jpg)).fields.find((f) => f.key === 'APP10').label, 'Restart-marker index (APP10 AROT)');
+});
+
+// MOV: video track (2 chunks) and a face-detection mebx track (3 samples in 2 chunks) interleaved in mdat.
+function movWithFaces() {
+  const hdlrB = (t) => full('hdlr', 0, 0, u32be(0), latin1(t), new Uint8Array(13));
+  const key = (id, name) => bbox(id, bbox('keyd', latin1('mdta'), latin1(name)), bbox('dtyp', u32be(0), u32be(0)));
+  const v1 = prng(120, 300); const f1 = latin1('FACEAAAAFACEBBBB'); const v2 = prng(121, 200); const f2 = latin1('FACECCCC');
+  const build = (base) => {
+    const o = (n) => u32be(base + n);
+    const vtrak = bbox('trak', full('tkhd', 0, 3, new Uint8Array(80)), bbox('mdia', full('mdhd', 0, 0, u32be(0), u32be(0), u32be(600), u32be(1200), new Uint8Array(4)), hdlrB('vide'),
+      bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), bbox('avc1', new Uint8Array(6), u16be(1), new Uint8Array(16), u16be(64), u16be(48), new Uint8Array(50))),
+        full('stsc', 0, 0, u32be(1), u32be(1), u32be(1), u32be(1)), full('stsz', 0, 0, u32be(0), u32be(2), u32be(300), u32be(200)), full('stco', 0, 0, u32be(2), o(0), o(316))))));
+    const mebx = bbox('mebx', new Uint8Array(6), u16be(1), bbox('keys', key('\0\0\0\x01', 'com.apple.quicktime.detected-face')));
+    const ftrak = bbox('trak', full('tkhd', 0, 3, new Uint8Array(80)), bbox('mdia', full('mdhd', 0, 0, new Uint8Array(20)), hdlrB('meta'),
+      bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), mebx),
+        full('stsc', 0, 0, u32be(2), u32be(1), u32be(2), u32be(1), u32be(2), u32be(1), u32be(1)), full('stsz', 0, 0, u32be(8), u32be(3)), full('stco', 0, 0, u32be(2), o(300), o(516))))));
+    return bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), vtrak, ftrak, bbox('udta', bbox('free', new Uint8Array(8))));
+  };
+  const ftyp = bbox('ftyp', latin1('qt  '), u32be(0), latin1('qt  '));
+  const body = concat([v1, f1, v2, f2]);
+  const m0 = build(0);
+  const base = ftyp.length + m0.length + 8;
+  return { file: concat([ftyp, build(base), bbox('mdat', body)]), v1, v2 };
+}
+
+test('MOV: removing face data drops the track and blanks every face sample; video samples stay intact', async () => {
+  const { file: before, v1, v2 } = movWithFaces();
+  const doc = await open(before);
+  assert.match(find(doc, 'faces').display, /3 samples, 24 B/);
+  find(doc, 'faces').deleted = true;
+  const out = await save(doc);
+  assert.equal(F.indexOf(out, latin1('FACE')), -1, 'no face sample bytes left');
+  const re = await open(out);
+  assert.equal(re.fields.find((f) => f.key === 'faces'), undefined);
+  assert.equal(re.technical.filter((t) => t[0].startsWith('Track')).length, 1);
+  assert.ok(F.indexOf(out, v1) > 0 && F.indexOf(out, v2) > 0, 'video samples present');
 });
