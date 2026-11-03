@@ -325,6 +325,78 @@ function encodeItemData(f, origData, value = f.value) {
   return makeBox('data', head, payload);
 }
 
+// ---- udta text boxes and per-track statistics ----
+
+const CODECS = { avc1: 'H.264', avc3: 'H.264', hvc1: 'HEVC', hev1: 'HEVC', dvh1: 'Dolby Vision HEVC', av01: 'AV1', vp09: 'VP9', mp4a: 'AAC/MPEG audio',
+  alac: 'Apple Lossless', 'ac-3': 'AC-3', 'ec-3': 'E-AC-3', Opus: 'Opus', fLaC: 'FLAC', 'mp4v': 'MPEG-4 Visual', apcn: 'ProRes 422', apch: 'ProRes 422 HQ', ap4h: 'ProRes 4444' };
+const TGPP = { titl: 'Title', auth: 'Author', dscp: 'Description', perf: 'Performer', gnre: 'Genre', cprt: 'Copyright', albm: 'Album', kywd: 'Keywords', yrrc: 'Recording year' };
+const QT_TEXT = { '\u00a9mak': 'Make', '\u00a9mod': 'Model', '\u00a9swr': 'Software', '\u00a9inf': 'Information', '\u00a9des': 'Description', '\u00a9fmt': 'Format', '\u00a9req': 'Requirements' };
+const UDTA_LABELS = { ...TGPP, ...QT_TEXT, date: 'Recording date' };
+
+function printable(s) {
+  return s && /^[^\u0000-\u0008\u000e-\u001f]*$/.test(s) ? s : null;
+}
+
+// Text of a udta child: Apple 'date' string, 3GPP asset boxes (TS 26.244), QuickTime international text atoms.
+function udtaText(buf, u) {
+  const p = u.start + u.hdr;
+  const end = u.start + u.size;
+  if (u.type === 'date') return printable(decodeUtf8(buf.subarray(p, end)).replace(/\0+$/, ''));
+  if (u.type === 'yrrc') return end - p >= 6 ? String(u16be(buf, p + 4)) : null;
+  if (TGPP[u.type] && u.type !== 'kywd') {
+    const q = p + 6;
+    if (q > end) return null;
+    const s = buf[q] === 0xfe && buf[q + 1] === 0xff ? decodeUtf16be(buf.subarray(q + 2, end)) : decodeUtf8(buf.subarray(q, end));
+    return printable(s.replace(/\0+$/, ''));
+  }
+  if (u.type.charCodeAt(0) === 0xa9) {
+    const out = [];
+    let o = p;
+    while (o + 4 <= end) {
+      const n = u16be(buf, o);
+      if (o + 4 + n > end) return null;
+      out.push(decodeUtf8(buf.subarray(o + 4, o + 4 + n)).replace(/\0+$/, ''));
+      o += 4 + n;
+    }
+    return out.length ? printable(out.join(' / ')) : null;
+  }
+  return null;
+}
+
+function handlerName(buf, h) {
+  const s = buf.subarray(h.start + h.hdr + 24, h.start + h.size);
+  if (!s.length) return '';
+  // QuickTime writes a Pascal string, ISO a C string.
+  const txt = s[0] === s.length - 1 ? decodeUtf8(s.subarray(1)) : decodeUtf8(s);
+  return printable(txt.replace(/\0+$/, '').trim()) || '';
+}
+
+// Frame rate (video) and average bitrate from mdhd and stsz.
+function trackStats(buf, trak, handler) {
+  const m = path(trak, 'mdia', 'mdhd');
+  const z = path(trak, 'mdia', 'minf', 'stbl', 'stsz');
+  if (!m || !z) return [];
+  const p = m.start + m.hdr;
+  const v1 = buf[p] === 1;
+  const ts = u32be(buf, p + (v1 ? 20 : 12));
+  const dur = v1 ? u64be(buf, p + 24) : u32be(buf, p + 16);
+  if (!ts || !dur) return [];
+  const secs = dur / ts;
+  const q = z.start + z.hdr;
+  const size = u32be(buf, q + 4);
+  const count = u32be(buf, q + 8);
+  let total = 0;
+  if (size) total = size * count;
+  else if (q + 12 + count * 4 <= z.start + z.size) for (let i = 0; i < count; i++) total += u32be(buf, q + 12 + i * 4);
+  const out = [];
+  if (handler === 'vide' && count) out.push(`${Math.round((count / secs) * 100) / 100} fps average`);
+  if (total) {
+    const kbps = (total * 8) / secs / 1000;
+    out.push(kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `${Math.round(kbps)} kbps`);
+  }
+  return out;
+}
+
 // ---- QuickTime keys/mdta metadata (moov/meta with an 'mdta' handler) ----
 
 const LOCATION_KEY = /location/i;
@@ -497,7 +569,7 @@ export async function load(file) {
     }
     if (TIMED_TEXT.has(handler)) timedText = true;
     if (handler === 'vide') hasVideo = true;
-    tracks.push({ handler, entry, detail });
+    tracks.push({ handler, entry, detail, stats: trackStats(buf, trak, handler), name: hdlr ? handlerName(buf, hdlr) : '' });
   }
   doc.format = hasVideo ? (brands && brands.major === 'qt  ' ? 'MOV' : 'MP4') : 'M4A';
   doc.timedText = timedText;
@@ -555,7 +627,9 @@ export async function load(file) {
           doc.udtaLocations.push({ node: u, value: loc });
           moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: u.type, label: `Location (udta/${u.type})`, display: loc, node: u }));
         } else {
-          moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: u.type, label: `udta/${u.type}`, display: sizeOf(u), node: u }));
+          const text = udtaText(buf, u);
+          const label = UDTA_LABELS[u.type] || (ITEM_EDIT[u.type] && ITEM_EDIT[u.type].label) || ITEM_PRESERVE[u.type];
+          moovFields.push(makeField({ cls: 'preserve', kind: 'info', key: u.type, label: label ? `${label} (udta/${u.type})` : `udta/${u.type}`, display: text !== null ? text : sizeOf(u), node: u }));
         }
       }
     } else if (c.type === 'meta') {
@@ -591,7 +665,7 @@ export async function load(file) {
   doc.technical.push(['Tags', doc.ilst ? 'iTunes ilst' : 'none']);
   doc.technical.push(['Duration', duration]);
   if (doc.created) doc.technical.push(['Created (mvhd)', doc.created]);
-  tracks.forEach((t, i) => doc.technical.push([`Track ${i + 1}`, `${t.handler} · ${t.entry}${t.detail ? ' · ' + t.detail : ''}`]));
+  tracks.forEach((t, i) => doc.technical.push([`Track ${i + 1}`, [t.handler, CODECS[t.entry] ? `${t.entry} (${CODECS[t.entry]})` : t.entry, t.detail, ...t.stats, t.name].filter(Boolean).join(' · ')]));
   for (const f of doc.ilstFields) if (f.key === '©too') doc.technical.push(['Encoder (©too)', f.display]);
   const mdats = doc.top.filter((b) => b.type === 'mdat');
   const layout = doc.top.map((b) => b.type).join(' · ');

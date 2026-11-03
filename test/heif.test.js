@@ -92,3 +92,20 @@ test('MOV: QuickTime keys and udta location shown; remove location keeps the oth
   const offs = readChunkOffsets(moov, parseMoov(moov))[0].offsets;
   assert.deepEqual(out.subarray(offs[0], offs[0] + 1024), prng(71, 1024), 'chunk offset still points at the payload');
 });
+
+test('MP4 udta text boxes (Apple date, 3GPP auth, QuickTime ©mak) and per-track frame rate and bitrate', async () => {
+  const udta = bbox('udta', bbox('date', latin1('2026-11-03T04:07:57.669-06:00')),
+    full('auth', 0, 0, u16be(0x55c4), latin1('ReplayKitRecording\0')), bbox('©mak', u16be(5), u16be(0x55c4), latin1('Apple')));
+  const sizes = Array.from({ length: 60 }, () => 1000);
+  const trak = bbox('trak', full('tkhd', 0, 3, new Uint8Array(80)), bbox('mdia', full('mdhd', 0, 0, u32be(0), u32be(0), u32be(600), u32be(1200), new Uint8Array(4)),
+    full('hdlr', 0, 0, u32be(0), latin1('vide'), new Uint8Array(12), latin1('Core Media Video\0')),
+    bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), bbox('hvc1', new Uint8Array(6), u16be(1), new Uint8Array(16), u16be(1290), u16be(2796), new Uint8Array(50))),
+      full('stsz', 0, 0, u32be(0), u32be(60), ...sizes.map(u32be)), full('stco', 0, 0, u32be(0))))));
+  const file = concat([bbox('ftyp', latin1('mp42'), u32be(1), latin1('isommp42')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), trak, udta), bbox('mdat', new Uint8Array(8))]);
+  const doc = await open(file);
+  assert.equal(find(doc, 'date').display, '2026-11-03T04:07:57.669-06:00');
+  assert.equal(find(doc, 'date').label, 'Recording date (udta/date)');
+  assert.equal(find(doc, 'auth').display, 'ReplayKitRecording');
+  assert.equal(find(doc, '©mak').display, 'Apple');
+  assert.equal(Object.fromEntries(doc.technical)['Track 1'], 'vide · hvc1 (HEVC) · 1290×2796 · 30 fps average · 240 kbps · Core Media Video');
+});
