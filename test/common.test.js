@@ -68,7 +68,7 @@ test('reading never loads the payload: only small regions are sliced', async () 
 
 test('Suno provenance parsed from COMM, TXXX comment, INFO ICMT, ©cmt', async () => {
   const d1 = await open(F.fixture1());
-  assert.deepEqual(provenance(d1), [{ where: 'COMM', created: '2025-03-04T05:06:07.000Z', id: F.SUNO_ID }]);
+  assert.deepEqual(provenance(d1), [{ where: 'COMM', created: '2025-03-04T05:06:07.000Z', id: F.SUNO_ID, relations: [] }]);
   const d2 = await open(F.fixture2().bytes);
   assert.deepEqual(provenance(d2).map((p) => p.where).sort(), ['COMM', 'TXXX comment']);
   const d3 = await open(F.fixture3());

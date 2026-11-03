@@ -3,8 +3,9 @@
 import { u32be, concat, formatBytes } from './bytes.js';
 import {
   decodeLatin1, decodeUtf16, decodeUtf16be, decodeUtf8, encodeLatin1, encodeUtf16Bom, encodeUtf8, isLatin1,
-  stripTrailingNulls, validateTrack, validateBpm, validateIsrc, validateYear, validateId3Timestamp, validateLang,
+  stripTrailingNulls, validateTrack, validateBpm, validateIsrc, validateYear, validateId3Timestamp, validateLang, validateBool,
 } from './text.js';
+import { resolveGenre } from './genres.js';
 import { makeField, isChanged, PICTURE_TYPES } from './fields.js';
 import { C2PA_MIME } from './c2pa.js';
 
@@ -169,14 +170,17 @@ function encodeStr(s, enc, terminate) {
 
 // ---- frame content parsers ----
 
+function parseTextValues(f) {
+  if (f.data.length < 1) return [''];
+  return decodeTextValues(f.data.subarray(1), f.data[0]);
+}
 function parseText(f) {
-  if (f.data.length < 1) return '';
-  return decodeTextValues(f.data.subarray(1), f.data[0]).join(' / ');
+  return parseTextValues(f).join(' / ');
 }
 function parseTxxx(f) {
   const enc = f.data[0];
   const d = readStr(f.data, 1, enc);
-  return { desc: d.str, value: stripTrailingNulls(decodeStr(f.data.subarray(d.next), enc)).split('\u0000').join(' / ') };
+  return { desc: d.str, values: stripTrailingNulls(decodeStr(f.data.subarray(d.next), enc)).split('\u0000') };
 }
 function parseLangText(f) {
   const enc = f.data[0];
@@ -228,16 +232,75 @@ export const TEXT_FIELDS = {
   TCOP: { label: 'Copyright' },
   TPUB: { label: 'Publisher' },
   TSRC: { label: 'ISRC', validate: validateIsrc, placeholder: 'CCXXXYYNNNNN' },
+  TIT1: { label: 'Grouping' },
+  TIT3: { label: 'Subtitle' },
+  TPE3: { label: 'Conductor' },
+  TPE4: { label: 'Remixer' },
+  TCMP: { label: 'Compilation', validate: validateBool, placeholder: '1 or 0', inputmode: 'numeric' },
+  TOAL: { label: 'Original album' },
+  TOPE: { label: 'Original artist' },
+  TLAN: { label: 'Language' },
+  TMED: { label: 'Media type' },
+  TENC: { label: 'Encoded by' },
+  TSOT: { label: 'Title sort' },
+  TSOP: { label: 'Artist sort' },
+  TSOA: { label: 'Album sort' },
+  TSO2: { label: 'Album artist sort' },
+  TSOC: { label: 'Composer sort' },
 };
-const DATE_V3 = { key: 'TYER', label: 'Year', validate: validateYear, placeholder: 'YYYY', inputmode: 'numeric' };
-const DATE_V4 = { key: 'TDRC', label: 'Recording date', validate: validateId3Timestamp, placeholder: 'yyyy-MM-dd' };
+const YEAR = { validate: validateYear, placeholder: 'YYYY', inputmode: 'numeric' };
+const STAMP = { validate: validateId3Timestamp, placeholder: 'yyyy-MM-dd' };
+// Frames that exist only in one version. The first entry is the recording date.
+const VERSION_FIELDS = {
+  3: { TYER: { label: 'Year', ...YEAR }, TORY: { label: 'Original year', ...YEAR } },
+  4: { TDRC: { label: 'Recording date', ...STAMP }, TDRL: { label: 'Release date', ...STAMP }, TDOR: { label: 'Original release date', ...STAMP } },
+};
 
-function dateDef(major) { return major === 3 ? DATE_V3 : DATE_V4; }
+function versionFields(major) { return VERSION_FIELDS[major === 3 ? 3 : 4]; }
 
 function editTextDef(id, major) {
   if (TEXT_FIELDS[id]) return { key: id, ...TEXT_FIELDS[id] };
-  const d = dateDef(major);
-  return id === d.key ? d : null;
+  const v = versionFields(major)[id];
+  return v ? { key: id, ...v } : null;
+}
+
+// Apply a per-value validator to each line of a multi-value field.
+function perLine(fn) {
+  if (!fn) return null;
+  return (v, f) => {
+    for (const line of v.split('\n')) { const e = fn(line, f); if (e) return e; }
+    return null;
+  };
+}
+
+// Field props for a text frame. Multiple values become one per line.
+function textProps(def, values, id) {
+  let shown = values;
+  let note = null;
+  if (id === 'TCON') {
+    const names = values.flatMap((v) => resolveGenre(v) || [v]);
+    if (names.join('\u0000') !== values.join('\u0000')) {
+      shown = names;
+      note = `Stored as genre code ${values.join(', ')}. An edit saves the names instead.`;
+    }
+  }
+  const multi = shown.length > 1;
+  if (multi) note = [note, 'Multiple values: one per line.'].filter(Boolean).join(' ');
+  return {
+    label: def.label, kind: multi ? 'multiline' : 'text', multi, value: multi ? shown.join('\n') : shown[0],
+    validate: multi ? perLine(def.validate) : def.validate || null, placeholder: def.placeholder, inputmode: def.inputmode, note,
+  };
+}
+
+function splitValues(f, v) {
+  if (!f.multi) return [v];
+  const lines = v.split('\n').filter((x) => x !== '');
+  return lines.length ? lines : [''];
+}
+
+function validateUserText(v, f) {
+  const dup = f.siblings && f.siblings().some((g) => g !== f && !g.deleted && g.key === 'TXXX' && g.value.desc === v.desc);
+  return dup ? 'Another user text frame has the same description' : null;
 }
 
 function latin1Url(v) { return isLatin1(v) ? null : 'URL must be ISO-8859-1 (percent-encode other characters)'; }
@@ -253,7 +316,7 @@ function validateLangText(v, f) {
 }
 
 const PRESERVE_LABELS = {
-  TSSE: 'Encoder settings', TXXX: 'User text', PRIV: 'Private', GEOB: 'Object', TENC: 'Encoded by',
+  TSSE: 'Encoder settings', TXXX: 'User text', TIPL: 'Involved people', TMCL: 'Musician credits', IPLS: 'Involved people', TCMP: 'Compilation', PRIV: 'Private', GEOB: 'Object', TENC: 'Encoded by',
   TLEN: 'Length', TDRL: 'Release date', TDEN: 'Encoding time', TDAT: 'Date', TIME: 'Time', TRDA: 'Recording dates',
   TORY: 'Original year', TDOR: 'Original release', TSOT: 'Title sort', TSOP: 'Artist sort', TSOA: 'Album sort',
   TSO2: 'Album artist sort', TSOC: 'Composer sort', TLAN: 'Language', TMED: 'Media type', TFLT: 'File type',
@@ -280,7 +343,7 @@ export function tagFields(tag, group = null) {
     try {
       const def = editTextDef(f.id, tag.major);
       if (def) {
-        fields.push(base(i, f, { label: def.label, kind: 'text', value: parseText(f), validate: def.validate || null, placeholder: def.placeholder, inputmode: def.inputmode }));
+        fields.push(base(i, f, textProps(def, parseTextValues(f), f.id)));
       } else if (f.id === 'COMM' || f.id === 'USLT') {
         const v = parseLangText(f);
         fields.push(base(i, f, {
@@ -305,7 +368,11 @@ export function tagFields(tag, group = null) {
         }
       } else if (f.id === 'TXXX') {
         const t = parseTxxx(f);
-        fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: `User text (TXXX): ${t.desc}`, display: t.value, txxx: t }));
+        const multi = t.values.length > 1;
+        fields.push(base(i, f, {
+          label: 'User text', kind: 'usertext', multi, value: { desc: t.desc, text: t.values.join(multi ? '\n' : '') },
+          validate: validateUserText, siblings, note: multi ? 'Multiple values: one per line.' : null,
+        }));
       } else if (f.id === 'PRIV') {
         const p = parsePriv(f);
         fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: 'Private (PRIV)', display: `${p.owner}, ${formatBytes(p.size)}` }));
@@ -330,11 +397,12 @@ export function addable(tag, fields) {
   const live = fields.filter((f) => !f.deleted);
   const has = (k) => live.some((f) => f.key === k);
   const out = [];
-  for (const k of Object.keys(TEXT_FIELDS)) if (!has(k)) out.push({ key: k, label: TEXT_FIELDS[k].label });
-  const d = dateDef(tag.major);
-  if (!has(d.key)) out.push({ key: d.key, label: d.label });
+  const vf = versionFields(tag.major);
+  const defs = { ...TEXT_FIELDS, ...vf };
+  for (const k of Object.keys(defs)) if (!has(k)) out.push({ key: k, label: defs[k].label });
   out.push({ key: 'COMM', label: 'Comment' });
   out.push({ key: 'USLT', label: 'Lyrics' });
+  out.push({ key: 'TXXX', label: 'User text (TXXX)' });
   if (!has('WOAS')) out.push({ key: 'WOAS', label: 'Source URL' });
   if (!live.some((f) => f.key === 'APIC' && f.value && f.value.ptype === 3)) out.push({ key: 'APIC', label: 'Front cover' });
   return out;
@@ -352,6 +420,7 @@ export function newField(tag, key, fields, group = null) {
     return makeField({ ...common, label: key === 'COMM' ? 'Comment' : 'Lyrics', kind: key === 'COMM' ? 'comment' : 'lyrics', value: { lang: 'eng', desc, text: '' }, validate: validateLangText, siblings });
   }
   if (key === 'WOAS') return makeField({ ...common, label: 'Source URL', kind: 'url', value: '', validate: latin1Url });
+  if (key === 'TXXX') return makeField({ ...common, label: 'User text', kind: 'usertext', value: { desc: '', text: '' }, validate: validateUserText, siblings });
   if (key === 'APIC') return makeField({ ...common, label: 'Picture: Front cover', kind: 'picture', value: { mime: '', ptype: 3, desc: '', data: null }, validate: (v) => (v.data ? null : 'Choose an image') });
   throw new Error('Cannot add ' + key);
 }
@@ -371,9 +440,14 @@ function frameHeader(id, size, major, status) {
 function serializeField(f, major) {
   const v = f.value;
   let data;
-  if (f.kind === 'text') {
-    const enc = chooseEnc(major, [v]);
-    data = concat([new Uint8Array([enc]), encodeStr(v, enc, false)]);
+  if (f.kind === 'text' || f.kind === 'multiline') {
+    const vals = splitValues(f, v);
+    const enc = chooseEnc(major, vals);
+    data = concat([new Uint8Array([enc]), encodeStr(vals.join('\u0000'), enc, false)]);
+  } else if (f.kind === 'usertext') {
+    const vals = splitValues(f, v.text);
+    const enc = chooseEnc(major, [v.desc, ...vals]);
+    data = concat([new Uint8Array([enc]), encodeStr(v.desc, enc, true), encodeStr(vals.join('\u0000'), enc, false)]);
   } else if (f.kind === 'comment' || f.kind === 'lyrics') {
     const enc = chooseEnc(major, [v.desc, v.text]);
     data = concat([new Uint8Array([enc]), encodeLatin1(v.lang), encodeStr(v.desc, enc, true), encodeStr(v.text, enc, false)]);
@@ -443,6 +517,6 @@ export function versionLabel(tag) {
 export function provenanceText(f) {
   if (f.deleted) return null;
   if (f.key === 'COMM' && f.value) return { text: f.value.text, where: 'COMM' };
-  if (f.key === 'TXXX' && f.txxx && f.txxx.desc.toLowerCase() === 'comment') return { text: f.txxx.value, where: 'TXXX comment' };
+  if (f.key === 'TXXX' && f.value && f.value.desc.toLowerCase() === 'comment') return { text: f.value.text, where: 'TXXX comment' };
   return null;
 }

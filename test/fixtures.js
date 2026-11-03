@@ -58,8 +58,12 @@ function cborHead(major, n) {
   if (n < 65536) return concat([new Uint8Array([(major << 5) | 25]), u16be(n)]);
   return concat([new Uint8Array([(major << 5) | 26]), u32be(n)]);
 }
+export class CTag { constructor(tag, value) { this.tag = tag; this.value = value; } }
+
 export function cbor(v) {
   if (v instanceof Wide) return concat([new Uint8Array([26]), u32be(v.v)]);
+  if (v instanceof CTag) return concat([cborHead(6, v.tag), cbor(v.value)]);
+  if (v instanceof Map) return concat([cborHead(5, v.size), ...[...v].flatMap(([k, x]) => [cbor(k), cbor(x)])]);
   if (v === null) return new Uint8Array([0xf6]);
   if (v === true) return new Uint8Array([0xf5]);
   if (v === false) return new Uint8Array([0xf4]);
@@ -93,13 +97,16 @@ export const HASH_MARK = new Uint8Array(32).fill(0xab);
 
 // Manifest store with c2pa.actions.v2, com.suno.provenance and a hash assertion.
 // hash: { kind: 'data', start, length } | { kind: 'bmff' }
-export function manifestStore(hash) {
+// extra.signature: CBOR bytes for the c2pa.signature box; extra.claim: fields merged into the claim;
+// extra.assertions: [label, value] pairs appended to the assertion store.
+export function manifestStore(hash, extra = {}) {
   const assertions = [
     jumb('c2pa.actions.v2', T_CBOR, box('cbor', cbor({
       actions: [{ action: 'c2pa.created', digitalSourceType: 'http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia', softwareAgent: { name: 'Suno', version: '4.5' } }],
     }))),
     jumb('com.suno.provenance', T_CBOR, box('cbor', cbor({ song_id: SUNO_ID, model: 'v4.5', created: '2025-03-04T05:06:07Z' }))),
   ];
+  for (const [label, value] of extra.assertions || []) assertions.push(jumb(label, T_CBOR, box('cbor', cbor(value))));
   if (hash.kind === 'data') {
     assertions.push(jumb('c2pa.hash.data', T_CBOR, box('cbor', cbor({
       exclusions: [{ start: wide(hash.start), length: wide(hash.length) }], name: 'jumbf manifest', alg: 'sha256', hash: HASH_MARK, pad: new Uint8Array(4),
@@ -109,9 +116,9 @@ export function manifestStore(hash) {
   }
   const claim = jumb('c2pa.claim.v2', T_CLAIM, box('cbor', cbor({
     instanceID: 'xmp:iid:00000000-0000-0000-0000-000000000001', claim_generator_info: { name: 'Suno', version: '1.0' }, alg: 'sha256',
-    signature: 'self#jumbf=c2pa.signature', created_assertions: [],
+    signature: 'self#jumbf=c2pa.signature', created_assertions: [], ...(extra.claim || {}),
   })));
-  const sig = jumb('c2pa.signature', T_SIG, box('cbor', cbor(new Uint8Array(64))));
+  const sig = jumb('c2pa.signature', T_SIG, box('cbor', extra.signature || cbor(new Uint8Array(64))));
   const manifest = jumb('urn:c2pa:11111111-2222-3333-4444-555555555555', T_MANIFEST, jumb('c2pa.assertions', T_ASSERTIONS, ...assertions), claim, sig);
   return jumb('c2pa', T_STORE, manifest);
 }
@@ -371,4 +378,59 @@ export function fixture6(opts = {}) {
 
 export function toFile(bytes, name = 'f.bin') {
   return new File([bytes], name);
+}
+
+// ---- DER (test only) ----
+function derLen(n) {
+  if (n < 128) return new Uint8Array([n]);
+  if (n < 256) return new Uint8Array([0x81, n]);
+  return new Uint8Array([0x82, n >> 8, n & 255]);
+}
+export function der(tag, ...content) {
+  const b = concat(content);
+  return concat([new Uint8Array([tag]), derLen(b.length), b]);
+}
+export function derOid(s) {
+  const p = s.split('.').map(Number);
+  const out = [p[0] * 40 + p[1]];
+  for (const n of p.slice(2)) {
+    const groups = [];
+    let v = n;
+    do { groups.unshift(v & 0x7f); v = Math.floor(v / 128); } while (v);
+    groups.forEach((g, i) => out.push(i < groups.length - 1 ? g | 0x80 : g));
+  }
+  return der(0x06, Uint8Array.from(out));
+}
+const seq = (...c) => der(0x30, ...c);
+const set = (...c) => der(0x31, ...c);
+export function derName(cn, o) {
+  return seq(set(seq(derOid('2.5.4.3'), der(0x0c, enc.encode(cn)))), set(seq(derOid('2.5.4.10'), der(0x13, latin1(o)))));
+}
+// Certificate with only the fields the reader looks at being meaningful. Times: 'YYMMDDhhmmssZ'.
+export function derCert(subject, issuer, notBefore, notAfter) {
+  const alg = seq(derOid('1.2.840.10045.4.3.2'));
+  const tbs = seq(der(0xa0, der(0x02, new Uint8Array([2]))), der(0x02, new Uint8Array([1])), alg, issuer,
+    seq(der(0x17, latin1(notBefore)), der(0x17, latin1(notAfter))), subject, seq(seq(derOid('1.2.840.10045.2.1')), der(0x03, new Uint8Array([0, 4]))));
+  return seq(tbs, alg, der(0x03, new Uint8Array([0, 1, 2])));
+}
+// RFC 3161 TimeStampToken with TSTInfo genTime ('YYYYMMDDhhmmssZ') and embedded certificates.
+export function derTimestamp(genTime, certs) {
+  const tst = seq(der(0x02, new Uint8Array([1])), derOid('1.2.3.4'), seq(seq(derOid('2.16.840.1.101.3.4.2.1')), der(0x04, new Uint8Array(32))),
+    der(0x02, new Uint8Array([5])), der(0x18, latin1(genTime)));
+  const eci = seq(derOid('1.2.840.113549.1.9.16.1.4'), der(0xa0, der(0x04, tst)));
+  const sd = seq(der(0x02, new Uint8Array([3])), set(), eci, der(0xa0, ...certs), set());
+  return seq(derOid('1.2.840.113549.1.7.2'), der(0xa0, sd));
+}
+// COSE_Sign1 (tag 18) with ES256, an x5chain in the protected header and a sigTst2 timestamp in the unprotected header.
+export function coseSignature() {
+  const root = derName('Test C2PA Root CA', 'Test Org');
+  const leaf = derCert(derName('Test Content Credentials', 'Test Org'), root, '260723150014Z', '281025150014Z');
+  const rootCert = derCert(root, root, '260723150014Z', '360720150014Z');
+  const tsaRoot = derName('Test TSA Root', 'Time Co');
+  const tsaLeaf = derCert(derName('Test Timestamp Responder', 'Time Co'), tsaRoot, '260101000000Z', '370101000000Z');
+  const tsaRootCert = derCert(tsaRoot, tsaRoot, '250101000000Z', '380101000000Z');
+  const token = derTimestamp('20250304050610Z', [tsaRootCert, tsaLeaf]);
+  const prot = cbor(new Map([[1, -7], [33, [leaf, rootCert]]]));
+  const unprot = new Map([['sigTst2', { tstTokens: [{ val: token }] }]]);
+  return cbor(new CTag(18, [prot, unprot, null, new Uint8Array(64)]));
 }

@@ -1,7 +1,7 @@
 // WAV (RIFF/WAVE): chunk walking, LIST/INFO editing, ID3 chunk editing.
 
 import { readBytes, u16le, u32le, fourcc, fourccBytes, concat, u32leBytes, formatBytes, formatDuration } from './bytes.js';
-import { decodeUtf8OrLatin1, encodeUtf8, validateIsoDay } from './text.js';
+import { decodeUtf8OrLatin1, encodeUtf8, validateIsoDay, validateTrack } from './text.js';
 import { makeField, isChanged } from './fields.js';
 import * as id3 from './id3.js';
 
@@ -15,6 +15,7 @@ export const INFO_EDIT = {
   ICOP: { label: 'Copyright' },
   IENG: { label: 'Engineer' },
   IKEY: { label: 'Keywords' },
+  ITRK: { label: 'Track', validate: validateTrack, placeholder: 'n or n/total' },
 };
 const INFO_PRESERVE = {
   ISFT: 'Software', ISRC: 'Source', ISBJ: 'Subject', ITCH: 'Technician', ISRF: 'Source form',

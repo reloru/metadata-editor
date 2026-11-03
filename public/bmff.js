@@ -4,7 +4,8 @@ import {
   readBytes, u16be, u32be, u64be, i16be, putU32be, putU64be, fourcc, fourccBytes, concat, uuidString,
   formatBytes, formatDuration, partsSize,
 } from './bytes.js';
-import { decodeUtf8, decodeUtf16be, encodeUtf8, validateTrack16, validateBpm16, validateMp4Day, parseTrack } from './text.js';
+import { decodeUtf8, decodeUtf16be, encodeUtf8, validateTrack16, validateBpm16, validateMp4Day, validateBool, parseTrack } from './text.js';
+import { gnreName } from './genres.js';
 import { makeField, isChanged, detectImageMime } from './fields.js';
 import { C2PA_BMFF_UUID, jumbfFromBmffUuidPayload } from './c2pa.js';
 
@@ -26,8 +27,24 @@ export const ITEM_EDIT = {
   '©cmt': { label: 'Comment', kind: 'multiline' },
   cprt: { label: 'Copyright' },
   covr: { label: 'Cover', kind: 'picture' },
+  '©grp': { label: 'Grouping' },
+  desc: { label: 'Description', kind: 'multiline' },
+  cpil: { label: 'Compilation', kind: 'bool', validate: validateBool, placeholder: '1 or 0', inputmode: 'numeric' },
+  sonm: { label: 'Title sort' },
+  soar: { label: 'Artist sort' },
+  soal: { label: 'Album sort' },
+  soaa: { label: 'Album artist sort' },
+  soco: { label: 'Composer sort' },
 };
-const ITEM_PRESERVE = { '©too': 'Encoder', gnre: 'Genre (ID3v1 index)', '----': 'Freeform' };
+const ITEM_PRESERVE = {
+  '©too': 'Encoder', gnre: 'Genre (ID3v1 index)', '----': 'Freeform', rtng: 'Content rating', stik: 'Media kind', pgap: 'Gapless album',
+  ldes: 'Long description', purd: 'Purchase date', '©enc': 'Encoded by', '©st3': 'Subtitle', '©wrk': 'Work', '©mvn': 'Movement name',
+  '©mvi': 'Movement number', '©mvc': 'Movement count', shwm: 'Show work and movement', tvsh: 'TV show', tven: 'TV episode ID',
+  tvsn: 'TV season', tves: 'TV episode', tvnn: 'TV network', hdvd: 'HD video', apID: 'Account', ownr: 'Owner', '©xyz': 'Location',
+};
+// Items stored as big-endian integers, often with data type 0 (implicit) rather than 21.
+const INT_ITEMS = new Set(['gnre', 'cpil', 'pgap', 'rtng', 'stik', 'tmpo', 'hdvd', 'tves', 'tvsn', 'shwm', '©mvi', '©mvc', 'akID', 'cnID', 'geID', 'plID', 'sfID', 'atID', 'cmID']);
+const TEXT_TYPES = new Set([1, 2]);
 
 const TIMED_TEXT = new Set(['sbtl', 'text']);
 
@@ -227,8 +244,13 @@ function itemFields(buf, item, timedText) {
     const nm = name ? stringBox(buf, name) : '';
     return [makeField({ ...base, cls: 'preserve', kind: 'info', label: `Freeform: ${nm}`, display: `${m} · ${nm} = ${val}`, freeform: { mean: m, name: nm, value: val } })];
   }
+  const decodeItem = (dn) => {
+    const d = dataBox(buf, dn);
+    return decodeData(d.type === 0 && INT_ITEMS.has(type) ? { ...d, type: 22 } : d);
+  };
   if (!def) {
-    const val = datas.map((d) => decodeData(dataBox(buf, d))).join(' / ');
+    let val = datas.map(decodeItem).join(' / ');
+    if (type === 'gnre' && /^\d+$/.test(val) && gnreName(Number(val))) val = `${gnreName(Number(val))} (${val})`;
     return [makeField({ ...base, cls: 'preserve', kind: 'info', label: `${ITEM_PRESERVE[type] || 'Item'} (${type})`, display: val })];
   }
   if (def.kind === 'picture') {
@@ -240,6 +262,19 @@ function itemFields(buf, item, timedText) {
     });
   }
   const d = dataBox(buf, datas[0]);
+  const plain = !def.kind || def.kind === 'multiline';
+  if (datas.length > 1 && plain) {
+    const all = datas.map((dn) => dataBox(buf, dn));
+    const shown = `${datas.length} values: ${all.map((x) => decodeData(x)).join(' / ')}`;
+    // Multi-line items (lyrics, comment) cannot use one line per value; keep them read-only.
+    if (def.kind === 'multiline' || !all.every((x) => TEXT_TYPES.has(x.type))) {
+      return [makeField({ ...base, cls: 'preserve', kind: 'info', label: `${def.label} (${type})`, display: shown })];
+    }
+    return [makeField({
+      ...base, label: def.label, kind: 'multiline', multi: true, value: all.map((x) => decodeData(x)).join('\n'),
+      note: 'Multiple values: one per line.', validate: null,
+    })];
+  }
   let value;
   if (def.kind === 'pair') {
     if (d.payload.length >= 6) {
@@ -247,7 +282,7 @@ function itemFields(buf, item, timedText) {
       const t = u16be(d.payload, 4);
       value = n || t ? (t ? `${n}/${t}` : String(n)) : '';
     } else value = '';
-  } else if (def.kind === 'int') {
+  } else if (def.kind === 'int' || def.kind === 'bool') {
     value = decodeData(d.type === 0 ? { ...d, type: 21 } : d);
   } else {
     value = decodeData(d);
@@ -259,10 +294,10 @@ function itemFields(buf, item, timedText) {
   })];
 }
 
-function encodeItemData(f, origData) {
+function encodeItemData(f, origData, value = f.value) {
   const def = ITEM_EDIT[f.key];
   const locale = origData ? origData.locale : new Uint8Array(4);
-  const v = f.value;
+  const v = value;
   let type;
   let payload;
   if (def.kind === 'pair') {
@@ -273,6 +308,9 @@ function encodeItemData(f, origData) {
   } else if (def.kind === 'int') {
     const n = Number(v);
     payload = new Uint8Array([(n >> 8) & 255, n & 255]);
+    type = 21;
+  } else if (def.kind === 'bool') {
+    payload = new Uint8Array([Number(v) ? 1 : 0]);
     type = 21;
   } else if (def.kind === 'picture') {
     type = v.mime === 'image/png' ? 14 : 13;
@@ -288,6 +326,39 @@ function encodeItemData(f, origData) {
 }
 
 // ---- load ----
+
+function mdhdTimescale(buf, trak) {
+  const m = path(trak, 'mdia', 'mdhd');
+  if (!m) return 0;
+  const p = m.start + m.hdr;
+  const off = buf[p] === 1 ? 20 : 12;
+  return p + off + 4 <= m.start + m.size ? u32be(buf, p + off) : 0;
+}
+
+// Audio sample rate: the 16.16 field in the sample entry holds only rates below 65536 Hz and is fixed
+// at 1.0 in QuickTime version-2 sound descriptions, so fall back to 'srat' or the media timescale.
+function soundRate(buf, trak, stsd, e) {
+  const end = stsd.start + stsd.size;
+  const rate = u16be(buf, e + 32);
+  const version = u16be(buf, e + 16);
+  const entryEnd = Math.min(end, e + u32be(buf, e));
+  const srat = indexOfType(buf, e + 36, entryEnd, 'srat');
+  if (srat >= 0 && srat + 16 <= entryEnd) return u32be(buf, srat + 12);
+  const ts = mdhdTimescale(buf, trak);
+  if (ts && (rate === 0 || ts > 65535 || version === 2)) return ts;
+  return rate;
+}
+
+// Offset of a child box of the given type within [o, end), or -1.
+function indexOfType(buf, o, end, type) {
+  while (o + 8 <= end) {
+    const size = u32be(buf, o);
+    if (fourcc(buf, o + 4) === type) return o;
+    if (size < 8) return -1;
+    o += size;
+  }
+  return -1;
+}
 
 export function detect(head) {
   if (head.length < 8) return false;
@@ -366,7 +437,7 @@ export async function load(file) {
     if (stsd && stsd.size >= stsd.hdr + 16) {
       const e = stsd.start + stsd.hdr + 8;
       entry = fourcc(buf, e + 4);
-      if (handler === 'soun' && e + 36 <= stsd.start + stsd.size) detail = `${u16be(buf, e + 24)} ch, ${u16be(buf, e + 32)} Hz, ${u16be(buf, e + 26)}-bit`;
+      if (handler === 'soun' && e + 36 <= stsd.start + stsd.size) detail = `${u16be(buf, e + 24)} ch, ${soundRate(buf, trak, stsd, e)} Hz, ${u16be(buf, e + 26)}-bit`;
       if (handler === 'vide' && e + 36 <= stsd.start + stsd.size) detail = `${u16be(buf, e + 32)}×${u16be(buf, e + 34)}`;
     }
     if (TIMED_TEXT.has(handler)) timedText = true;
@@ -434,11 +505,14 @@ export async function load(file) {
     const ts = v === 1 ? u32be(buf, p + 20) : u32be(buf, p + 12);
     const du = v === 1 ? u64be(buf, p + 24) : u32be(buf, p + 16);
     if (ts) duration = formatDuration(du / ts);
+    const created = v === 1 ? u64be(buf, p + 4) : u32be(buf, p + 4);
+    if (created) doc.created = new Date(Date.UTC(1904, 0, 1) + created * 1000).toISOString().replace('.000Z', 'Z');
   }
   doc.technical.push(['Container', `ISO BMFF (${doc.format})`]);
   if (brands) doc.technical.push(['Brands', `${brands.major} (${brands.compatible.join(', ')})`]);
   doc.technical.push(['Tags', doc.ilst ? 'iTunes ilst' : 'none']);
   doc.technical.push(['Duration', duration]);
+  if (doc.created) doc.technical.push(['Created (mvhd)', doc.created]);
   tracks.forEach((t, i) => doc.technical.push([`Track ${i + 1}`, `${t.handler} · ${t.entry}${t.detail ? ' · ' + t.detail : ''}`]));
   for (const f of doc.ilstFields) if (f.key === '©too') doc.technical.push(['Encoder (©too)', f.display]);
   const mdats = doc.top.filter((b) => b.type === 'mdat');
@@ -521,7 +595,15 @@ function buildIlstChildren(doc) {
     if (f.deleted) continue;
     const datas = item.children.filter((c) => c.type === 'data');
     const others = item.children.filter((c) => c.type !== 'data').map((c) => buf.subarray(c.start, c.start + c.size));
-    parts.push(makeBox(item.type, ...others, encodeItemData(f, dataBox(buf, datas[0]))));
+    let newData;
+    if (f.multi) {
+      const lines = f.value.split('\n').filter((x) => x !== '');
+      newData = (lines.length ? lines : ['']).map((line, i) => encodeItemData(f, dataBox(buf, datas[Math.min(i, datas.length - 1)]), line));
+    } else {
+      // Any further data boxes of a single-value item are kept as they were.
+      newData = [encodeItemData(f, dataBox(buf, datas[0])), ...datas.slice(1).map((dn) => buf.subarray(dn.start, dn.start + dn.size))];
+    }
+    parts.push(makeBox(item.type, ...others, ...newData));
   }
   for (const f of doc.ilstFields) {
     if (!f.isNew || f.deleted) continue;

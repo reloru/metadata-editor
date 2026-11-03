@@ -4,6 +4,7 @@
 import { u32be, u64be, fourcc, uuidString, indexOfSeq } from './bytes.js';
 import { decodeCbor, CborTag, CborSimple, CBOR_UNDEFINED } from './cbor.js';
 import { decodeUtf8 } from './text.js';
+import { parseCertificate, parseTimestampToken } from './der.js';
 
 export const C2PA_MIME = 'application/c2pa';
 export const C2PA_BMFF_UUID = 'd8fec3d6-1b0e-483c-9297-5828877ec481';
@@ -78,7 +79,7 @@ export function parseManifestStore(bytes) {
   const manifests = [];
   for (const m of store.children) {
     if (m.type !== 'jumb') continue;
-    const manifest = { label: m.label, assertions: [], claim: null, claimLabel: null };
+    const manifest = { label: m.label, assertions: [], claim: null, claimLabel: null, signature: null };
     for (const part of m.children) {
       if (part.type !== 'jumb') continue;
       const bl = baseLabel(part.label);
@@ -91,6 +92,9 @@ export function parseManifestStore(bytes) {
         const c = contentOf(bytes, part);
         manifest.claimLabel = part.label;
         manifest.claim = c.kind === 'cbor' ? c.value : null;
+      } else if (bl === 'c2pa.signature') {
+        const c = contentOf(bytes, part);
+        manifest.signature = c.kind === 'cbor' ? c.value : null;
       }
     }
     manifests.push(manifest);
@@ -151,18 +155,81 @@ function nameOf(info) {
   return displayValue(info);
 }
 
+// claim_generator_info entry -> "name version" plus any extra string-valued keys ("org.x.lib 1.2").
+function generatorOf(info) {
+  const main = nameOf(info);
+  if (!info || typeof info !== 'object' || info instanceof Map) return main ? [main] : [];
+  const extra = Object.keys(info).filter((k) => k !== 'name' && k !== 'version' && typeof info[k] === 'string').map((k) => `${k} ${info[k]}`);
+  return [main, ...extra].filter(Boolean);
+}
+
+function get(m, k) {
+  if (m instanceof Map) return m.get(k);
+  if (m && typeof m === 'object') return m[k];
+  return undefined;
+}
+
+const COSE_ALGS = { [-7]: 'ES256', [-35]: 'ES384', [-36]: 'ES512', [-37]: 'PS256', [-38]: 'PS384', [-39]: 'PS512', [-8]: 'Ed25519' };
+
+// COSE_Sign1 signature -> { alg, signer, issuer, notBefore, notAfter, timestamp, tsa } (all unvalidated).
+export function signatureInfo(sig) {
+  let s = sig instanceof CborTag ? sig.value : sig;
+  if (!Array.isArray(s) || s.length < 4) return null;
+  let prot = null;
+  if (s[0] instanceof Uint8Array && s[0].length) {
+    try { prot = decodeCbor(s[0]); } catch { prot = null; }
+  }
+  const unprot = s[1];
+  const hdr = (k) => (get(prot, k) !== undefined ? get(prot, k) : get(unprot, k));
+  const out = { alg: null, signer: null, issuer: null, notBefore: null, notAfter: null, timestamp: null, tsa: null, errors: [] };
+  const alg = hdr(1);
+  out.alg = typeof alg === 'number' ? COSE_ALGS[alg] || `COSE ${alg}` : typeof alg === 'string' ? alg : null;
+  let chain = hdr(33);
+  if (chain === undefined) chain = hdr('x5chain');
+  const leaf = Array.isArray(chain) ? chain[0] : chain;
+  if (leaf instanceof Uint8Array) {
+    try {
+      const c = parseCertificate(leaf);
+      Object.assign(out, { signer: c.subject, issuer: c.issuer, notBefore: c.notBefore, notAfter: c.notAfter });
+    } catch (err) { out.errors.push('certificate: ' + err.message); }
+  }
+  for (const key of ['sigTst2', 'sigTst']) {
+    const t = hdr(key);
+    const tokens = get(t, 'tstTokens');
+    const first = Array.isArray(tokens) ? get(tokens[0], 'val') : null;
+    if (first instanceof Uint8Array) {
+      try {
+        const ts = parseTimestampToken(first);
+        out.timestamp = ts.genTime;
+        out.tsa = ts.tsa;
+      } catch (err) { out.errors.push('timestamp: ' + err.message); }
+      break;
+    }
+  }
+  return out;
+}
+
 // Summary of a parsed store for display.
 export function summarize(store) {
   const m = store.active;
-  const out = { manifestCount: store.manifests.length, activeLabel: m ? m.label : null, assertions: [], actions: [], suno: [], generator: [], hashes: [] };
+  const out = {
+    manifestCount: store.manifests.length, activeLabel: m ? m.label : null, assertions: [], actions: [], suno: [], generator: [], hashes: [],
+    instanceID: null, title: null, format: null, softBinding: [], ingredients: [], signature: null,
+  };
   if (!m) return out;
   out.assertions = m.assertions.map((a) => a.label);
   const claim = m.claim;
   if (claim && typeof claim === 'object') {
     const gi = claim.claim_generator_info;
-    if (Array.isArray(gi)) for (const g of gi) out.generator.push(nameOf(g));
-    else if (gi) out.generator.push(nameOf(gi));
+    if (Array.isArray(gi)) for (const g of gi) out.generator.push(...generatorOf(g));
+    else if (gi) out.generator.push(...generatorOf(gi));
     if (typeof claim.claim_generator === 'string' && !out.generator.length) out.generator.push(claim.claim_generator);
+    if (typeof claim.instanceID === 'string') out.instanceID = claim.instanceID;
+    if (typeof claim['dc:title'] === 'string') out.title = claim['dc:title'];
+    if (typeof claim['dc:format'] === 'string') out.format = claim['dc:format'];
+  }
+  if (m.signature !== null && m.signature !== undefined) {
+    try { out.signature = signatureInfo(m.signature); } catch (err) { out.signature = { errors: [err.message] }; }
   }
   for (const a of m.assertions) {
     if ((a.base === 'c2pa.actions.v2' || a.base === 'c2pa.actions') && a.value && Array.isArray(a.value.actions)) {
@@ -180,6 +247,12 @@ export function summarize(store) {
       else if (a.error) out.suno.push(['error', a.error]);
     }
     if (a.base.startsWith('c2pa.hash.')) out.hashes.push(a.base);
+    if (a.base === 'c2pa.soft-binding' && a.value && typeof a.value.alg === 'string') out.softBinding.push(a.value.alg);
+    if (a.base.startsWith('c2pa.ingredient') && a.value && typeof a.value === 'object') {
+      const t = a.value.title || a.value['dc:title'];
+      const rel = a.value.relationship;
+      out.ingredients.push([typeof t === 'string' ? t : '(untitled)', typeof rel === 'string' ? rel : null].filter(Boolean).join(' · '));
+    }
   }
   return out;
 }
