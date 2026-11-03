@@ -2,13 +2,14 @@
 
 import {
   openFile, isDirty, changeCount, needsC2paChoice, errors, addable, addField, revert, revertAll, buildOutput,
-  provenance, checkC2paHash, isChanged,
+  provenance, checkC2paHash, isChanged, BUILD,
 } from './editor.js';
 import { fieldError, detectImageMime, PICTURE_TYPES } from './fields.js';
 import { formatBytes } from './bytes.js';
 import { nameString } from './der.js';
 
 const $ = (id) => document.getElementById(id);
+$('build').textContent = `Build ${BUILD.startsWith('__') ? 'dev' : BUILD}`;
 let doc = null;
 let urls = [];
 let pendingShare = null;

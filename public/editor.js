@@ -14,6 +14,9 @@ import * as heif from './heif.js';
 import * as ogg from './ogg.js';
 import { readHeader as id3Header } from './id3.js';
 
+// Replaced with the commit ID by the deploy workflow.
+export const BUILD = '__BUILD__';
+
 const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', WebP: 'image/webp', Opus: 'audio/ogg', 'Ogg Vorbis': 'audio/ogg', HEIC: 'image/heic', AVIF: 'image/avif' };
 
 function unsupported(head) {
