@@ -157,3 +157,37 @@ export function removeGps(src) {
   if (r.le) { b[off] = c & 255; b[off + 1] = c >> 8; } else { b[off] = c >> 8; b[off + 1] = c & 255; }
   return b;
 }
+
+// Whether the GPS IFD and all its out-of-line values lie inside b (needed before an in-place removal).
+export function gpsWithin(t, b) {
+  const g = t.gps;
+  if (!g) return false;
+  if (g.off + 2 + g.n * 12 + 4 > b.length) return false;
+  for (const e of g.entries.values()) if (e.size > 4 && e.at + e.size > b.length) return false;
+  return true;
+}
+
+function exifUtc(date, offset) {
+  const m = /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(date || '');
+  if (!m) return NaN;
+  const o = /^([+-])(\d{2}):(\d{2})$/.exec(offset || '');
+  const local = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+  return o ? local - (o[1] === '-' ? -1 : 1) * ((+o[2]) * 60 + (+o[3])) * 60000 : NaN;
+}
+
+// A note when the GPS timestamp (UTC) and Date taken differ by more than an hour. Editing the date
+// (for example with Photos' Adjust) can leave the GPS time at the original capture time.
+export function gpsTimeNote(t) {
+  const g = t.gps;
+  if (!g) return null;
+  const d = str(g, 0x1d);
+  const tm = val(g, 7);
+  if (!d || !Array.isArray(tm) || tm.length < 3) return null;
+  const dm = /^(\d{4}):(\d{2}):(\d{2})$/.exec(d);
+  if (!dm) return null;
+  const gpsMs = Date.UTC(+dm[1], +dm[2] - 1, +dm[3], Math.floor(tm[0]), Math.floor(tm[1]), Math.floor(tm[2]));
+  const taken = exifUtc(str(t.exif, 0x9003), str(t.exif, 0x9011));
+  if (!Number.isFinite(gpsMs) || !Number.isFinite(taken) || Math.abs(gpsMs - taken) <= 3600000) return null;
+  const gpsText = new Date(gpsMs).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+  return `The GPS timestamp (${gpsText}) does not match Date taken (${str(t.exif, 0x9003)} ${str(t.exif, 0x9011)}). If the date was edited, the GPS time may still show the original capture time; Remove location also removes it.`;
+}

@@ -4,7 +4,7 @@
 import { readBytes, u16be, u32be, u32le, fourcc, fourccBytes, concat, formatBytes, crc32, u32beBytes, u32leBytes } from './bytes.js';
 import { decodeLatin1, decodeUtf8, decodeUtf8OrLatin1, decodeUtf16be, encodeUtf8, encodeLatin1, isLatin1 } from './text.js';
 import { makeField, isChanged } from './fields.js';
-import { parseTiff, exifRows, gpsSummary, removeGps, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
+import { parseTiff, exifRows, gpsSummary, removeGps, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 
 const PNG_SIG = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -80,6 +80,8 @@ function exifFields(doc, tiffBytes, where, group) {
   const cam = rows.find((r) => r[0] === 'Camera');
   const date = rows.find((r) => r[0] === 'Date taken');
   if (!cam && !date && !gps) doc.notes.push(STRIPPED_NOTE);
+  const tn = gpsTimeNote(t);
+  if (tn) doc.notes.push(tn);
   return [cam && cam[1], date && date[1], gps ? 'GPS' : null].filter(Boolean).join(' · ') || `${formatBytes(tiffBytes.length)}`;
 }
 
@@ -193,6 +195,7 @@ async function loadJpeg(file) {
       let id = '';
       for (let i = 0; i < Math.min(d.length, 32) && d[i] >= 0x20 && d[i] < 0x7f; i++) id += String.fromCharCode(d[i]);
       if (m === 0xea && id.startsWith('AROT')) s.field = pf('Restart-marker index (APP10 AROT)', `${size} · offsets into the image data; unaffected by metadata edits`);
+      else if (m === 0xe2 && id.startsWith('urn:iso:std:iso:ts:21496')) s.field = pf('Gain map info (ISO 21496-1)', `${size} · HDR gain map metadata`);
       else s.field = pf(`APP${m - 0xe0}${id ? ' ' + id : ''}`, size);
     }
   }

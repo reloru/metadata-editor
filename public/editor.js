@@ -12,12 +12,13 @@ import * as flac from './flac.js';
 import * as aiff from './aiff.js';
 import * as heif from './heif.js';
 import * as ogg from './ogg.js';
+import * as tiffimg from './tiffimg.js';
 import { readHeader as id3Header } from './id3.js';
 
 // Replaced with the commit ID by the deploy workflow.
 export const BUILD = '__BUILD__';
 
-const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', WebP: 'image/webp', Opus: 'audio/ogg', 'Ogg Vorbis': 'audio/ogg', HEIC: 'image/heic', AVIF: 'image/avif' };
+const MIME = { MP3: 'audio/mpeg', WAV: 'audio/wav', M4A: 'audio/mp4', MP4: 'video/mp4', JPEG: 'image/jpeg', PNG: 'image/png', FLAC: 'audio/flac', AIFF: 'audio/aiff', AIFC: 'audio/aiff', MOV: 'video/quicktime', WebP: 'image/webp', Opus: 'audio/ogg', 'Ogg Vorbis': 'audio/ogg', HEIC: 'image/heic', AVIF: 'image/avif', DNG: 'image/x-adobe-dng', TIFF: 'image/tiff' };
 
 function unsupported(head) {
   if (head.length >= 4) {
@@ -39,13 +40,14 @@ export async function openFile(file) {
   if (afterTag && flac.detect(afterTag)) mod = flac;
   else if (image.detect(head)) mod = image;
   else if (heif.detect(head)) mod = heif;
+  else if (tiffimg.detect(head)) mod = tiffimg;
   else if (flac.detect(head)) mod = flac;
   else if (ogg.detect(head)) mod = ogg;
   else if (aiff.detect(head)) mod = aiff;
   else if (riff.detect(head)) mod = riff;
   else if (bmff.detect(head)) mod = bmff;
   else if (await mp3.detect(head)) mod = mp3;
-  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, Ogg, M4A, MP4/MOV, JPEG, PNG, WebP or HEIC (detected by content, not extension).');
+  else throw new Error('Unrecognized file: not MP3, WAV, AIFF, FLAC, Ogg, M4A, MP4/MOV, JPEG, PNG, WebP, HEIC or TIFF/DNG (detected by content, not extension).');
   const doc = await mod.load(file);
   if (mod === mp3 && doc.tagEnd) {
     const after = await readBytes(file, doc.tagEnd, doc.tagEnd + 4);
