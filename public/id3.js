@@ -377,9 +377,9 @@ export function tagFields(tag, group = null) {
         const p = parsePriv(f);
         fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: 'Private (PRIV)', display: `${p.owner}, ${formatBytes(p.size)}` }));
       } else if (f.id[0] === 'T' && f.id !== 'TXXX') {
-        fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: `${PRESERVE_LABELS[f.id] || 'Text'} (${f.id})`, display: parseText(f) }));
+        fields.push(base(i, f, textProps({ label: PRESERVE_LABELS[f.id] || `Text (${f.id})` }, parseTextValues(f), f.id)));
       } else if (f.id[0] === 'W' && f.id !== 'WXXX') {
-        fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: `${PRESERVE_LABELS[f.id] || 'URL'} (${f.id})`, display: parseUrl(f) }));
+        fields.push(base(i, f, { label: PRESERVE_LABELS[f.id] || `URL (${f.id})`, kind: 'url', value: parseUrl(f), validate: latin1Url }));
       } else {
         fields.push(base(i, f, { cls: 'preserve', kind: 'info', label: `${PRESERVE_LABELS[f.id] || 'Frame'} (${f.id})`, display: sizeStr }));
       }

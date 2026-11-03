@@ -79,7 +79,7 @@ function infoField(item, idx) {
   if (def) {
     return makeField({ key: item.id, group: 'INFO', label: def.label, kind: def.kind || 'text', value, validate: def.validate || null, placeholder: def.placeholder, infoIndex: idx });
   }
-  return makeField({ key: item.id, group: 'INFO', cls: 'preserve', kind: 'info', label: `${INFO_PRESERVE[item.id] || 'INFO'} (${item.id})`, display: value, infoIndex: idx });
+  return makeField({ key: item.id, group: 'INFO', label: INFO_PRESERVE[item.id] || `INFO ${item.id}`, kind: value.includes('\n') ? 'multiline' : 'text', value, infoIndex: idx });
 }
 
 export async function load(file) {
@@ -154,8 +154,8 @@ export async function load(file) {
   }
   doc.technical.push(['Duration', fmt && fmt.byteRate && dataSize !== null ? formatDuration(dataSize / fmt.byteRate) : 'unknown']);
   const isft = doc.info && doc.info.fields.find((f) => f.key === 'ISFT');
-  if (isft) doc.technical.push(['Encoder (ISFT)', isft.display]);
-  if (doc.id3) for (const f of doc.id3.fields) if (f.key === 'TSSE') doc.technical.push(['Encoder (ID3 TSSE)', f.display]);
+  if (isft) doc.technical.push(['Encoder (ISFT)', isft.value || isft.display]);
+  if (doc.id3) for (const f of doc.id3.fields) if (f.key === 'TSSE') doc.technical.push(['Encoder (ID3 TSSE)', f.value || f.display]);
   doc.summary = `WAV · ${fmt ? fmt.codec + ' ' + fmt.bits + '-bit' : 'unknown format'}${tags.length ? ' · ' + tags.join(' + ') : ''}`;
   return doc;
 }

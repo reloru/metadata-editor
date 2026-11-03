@@ -204,7 +204,7 @@ export async function load(file) {
   doc.fields.push(makeField({ cls: 'protected', kind: 'info', key: 'audio', label: 'MPEG audio data', display: formatBytes(end - doc.tagEnd), deletable: false }));
   doc.technical.unshift(['Container', 'MPEG audio (MP3)'], ['Tag', doc.tag ? id3.versionLabel(doc.tag) : 'none']);
   doc.technical.push(['Duration', duration]);
-  for (const f of tagFields) if (f.key === 'TSSE' && !f.deleted) doc.technical.push(['Encoder (TSSE)', f.display]);
+  for (const f of tagFields) if (f.key === 'TSSE' && !f.deleted) doc.technical.push(['Encoder (TSSE)', f.value || f.display]);
   doc.summary = `MP3 · ${codec}${doc.tag ? ' · ' + id3.versionLabel(doc.tag) : ' · no ID3v2 tag'}`;
   return doc;
 }

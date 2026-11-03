@@ -181,7 +181,7 @@ test('ID3v2.3 unsynchronisation: decoded on read, written without it', async () 
   const re = await open(out);
   assert.equal(find(re, 'TIT2').value, 'Re-synced');
   assert.deepEqual(find(re, 'APIC').value.data, F.FAKE_JPEG);
-  assert.equal(find(re, 'TSSE').display, 'enc');
+  assert.equal(find(re, 'TSSE').value, 'enc');
   await assertPayloadIntact(bytes, out);
 });
 
