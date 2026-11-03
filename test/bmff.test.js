@@ -123,7 +123,7 @@ test('MP4: ©lyr edit warns about timed-text track; tracks listed', async () => 
   const doc = await open(F.fixture5());
   assert.match(find(doc, A9 + 'lyr').note, /timed-text/);
   const tech = Object.fromEntries(doc.technical);
-  assert.equal(tech['Track 1'], 'soun · mp4a · 2 ch, 44100 Hz, 16-bit');
+  assert.equal(tech['Track 1'], 'soun · mp4a (AAC/MPEG audio) · 2 ch, 44100 Hz, 16-bit');
   assert.equal(tech['Track 2'], 'sbtl · tx3g');
   assert.equal(tech.Duration, '0:05.000');
   const d6 = await open(F.fixture6());
