@@ -180,7 +180,8 @@ async function loadJpeg(file) {
     } else {
       let id = '';
       for (let i = 0; i < Math.min(d.length, 32) && d[i] >= 0x20 && d[i] < 0x7f; i++) id += String.fromCharCode(d[i]);
-      s.field = pf(`APP${m - 0xe0}${id ? ' ' + id : ''}`, size);
+      if (m === 0xea && id.startsWith('AROT')) s.field = pf('Restart-marker index (APP10 AROT)', `${size} · offsets into the image data; unaffected by metadata edits`);
+      else s.field = pf(`APP${m - 0xe0}${id ? ' ' + id : ''}`, size);
     }
   }
   if (icc.length) {

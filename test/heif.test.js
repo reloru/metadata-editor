@@ -109,3 +109,31 @@ test('MP4 udta text boxes (Apple date, 3GPP auth, QuickTime ©mak) and per-track
   assert.equal(find(doc, '©mak').display, 'Apple');
   assert.equal(Object.fromEntries(doc.technical)['Track 1'], 'vide · hvc1 (HEVC) · 1290×2796 · 30 fps average · 240 kbps · Core Media Video');
 });
+
+test('MOV: rotation from the tkhd matrix, timed-metadata key names, face-detection note', async () => {
+  const matrix = concat([u32be(0), u32be(0x10000), u32be(0), u32be(0xffff0000), u32be(0), u32be(0), u32be(0), u32be(0), u32be(0x40000000)]);
+  const tkhd = full('tkhd', 0, 3, new Uint8Array(36), matrix, new Uint8Array(8));
+  const hdlrB = (t) => full('hdlr', 0, 0, u32be(0), latin1(t), new Uint8Array(13));
+  const vtrak = bbox('trak', tkhd, bbox('mdia', full('mdhd', 0, 0, new Uint8Array(20)), hdlrB('vide'),
+    bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), bbox('avc1', new Uint8Array(6), u16be(1), new Uint8Array(16), u16be(1920), u16be(1080), new Uint8Array(50))), full('stco', 0, 0, u32be(0))))));
+  const key = (id, name) => bbox(id, bbox('keyd', latin1('mdta'), latin1(name)), bbox('dtyp', u32be(0), u32be(0)));
+  const mebx = bbox('mebx', new Uint8Array(6), u16be(1), bbox('keys', key('\0\0\0\x01', 'com.apple.quicktime.detected-face'), key('\0\0\0\x02', 'com.apple.quicktime.detected-face.bounds')));
+  const mtrak = bbox('trak', full('tkhd', 0, 3, new Uint8Array(80)), bbox('mdia', full('mdhd', 0, 0, new Uint8Array(20)), hdlrB('meta'),
+    bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), mebx), full('stco', 0, 0, u32be(0))))));
+  const doc = await open(concat([bbox('ftyp', latin1('qt  '), u32be(0), latin1('qt  ')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), vtrak, mtrak), bbox('mdat', new Uint8Array(8))]));
+  const tracks = doc.fields.filter((f) => f.key === 'trak').map((f) => [f.label, f.display]);
+  assert.deepEqual(tracks, [['Track (vide)', 'avc1, 1920×1080, rotated 90° (shows as 1080×1920)'], ['Track (timed metadata)', 'mebx, detected-face, detected-face.bounds']]);
+  assert.ok(doc.notes.some((n) => /face-detection metadata track/.test(n)));
+});
+
+test('M4A: iTunSMPB gapless info decoded; JPEG APP10 AROT labelled', async () => {
+  const ff = bbox('----', full('mean', 0, 0, latin1('com.apple.iTunes')), full('name', 0, 0, latin1('iTunSMPB')),
+    bbox('data', new Uint8Array([0, 0, 0, 1]), new Uint8Array(4), latin1(' 00000000 00000800 0000028B 00000000002B0575 00000000')));
+  const trak = bbox('trak', full('tkhd', 0, 3, new Uint8Array(80)), bbox('mdia', full('mdhd', 0, 0, new Uint8Array(20)), full('hdlr', 0, 0, u32be(0), latin1('soun'), new Uint8Array(13)),
+    bbox('minf', bbox('stbl', full('stsd', 0, 0, u32be(1), bbox('mp4a', new Uint8Array(6), u16be(1), new Uint8Array(8), u16be(2), u16be(16), u16be(0), u16be(0), u32be(48000 * 65536))), full('stco', 0, 0, u32be(0))))));
+  const meta = full('meta', 0, 0, full('hdlr', 0, 0, u32be(0), latin1('mdir'), new Uint8Array(13)), bbox('ilst', ff));
+  const doc = await open(concat([bbox('ftyp', latin1('M4A '), u32be(0), latin1('M4A ')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), trak, bbox('udta', meta)), bbox('mdat', new Uint8Array(8))]));
+  assert.equal(Object.fromEntries(doc.technical)['Gapless (iTunSMPB)'], '2048 samples delay, 651 samples padding, 2819445 samples');
+  const jpg = concat([new Uint8Array([0xff, 0xd8]), F.jpegSeg(0xea, concat([latin1('AROT'), new Uint8Array(20)])), F.jpegSeg(0xc0, concat([new Uint8Array([8]), u16be(8), u16be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
+  assert.equal((await open(jpg)).fields.find((f) => f.key === 'APP10').label, 'Restart-marker index (APP10 AROT)');
+});
