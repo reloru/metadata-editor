@@ -67,6 +67,29 @@ export function detectImageMime(data) {
   return null;
 }
 
+// Width, height and bits per pixel of a JPEG or PNG, or null.
+export function imageInfo(d) {
+  if (!d) return null;
+  if (detectImageMime(d) === 'image/png' && d.length >= 29) {
+    const w = ((d[16] << 24) | (d[17] << 16) | (d[18] << 8) | d[19]) >>> 0;
+    const hgt = ((d[20] << 24) | (d[21] << 16) | (d[22] << 8) | d[23]) >>> 0;
+    const ch = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[d[25]] || 1;
+    return { width: w, height: hgt, depth: d[24] * ch };
+  }
+  if (detectImageMime(d) === 'image/jpeg') {
+    let o = 2;
+    while (o + 9 < d.length && d[o] === 0xff) {
+      const m = d[o + 1];
+      if (m === 0xd8 || (m >= 0xd0 && m <= 0xd7)) { o += 2; continue; }
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) {
+        return { width: (d[o + 7] << 8) | d[o + 8], height: (d[o + 5] << 8) | d[o + 6], depth: d[o + 4] * d[o + 9] };
+      }
+      o += 2 + ((d[o + 2] << 8) | d[o + 3]);
+    }
+  }
+  return null;
+}
+
 export const PICTURE_TYPES = [
   'Other', '32x32 file icon', 'Other file icon', 'Front cover', 'Back cover', 'Leaflet page', 'Media',
   'Lead artist', 'Artist', 'Conductor', 'Band', 'Composer', 'Lyricist', 'Recording location',

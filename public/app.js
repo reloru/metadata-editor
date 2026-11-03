@@ -286,6 +286,10 @@ function renderEditField(f) {
         h('label', { class: 'mini' }, 'Lang', h('input', { class: 'lang', value: f.value.lang, maxLength: 3, disabled: dis, autocapitalize: 'off', spellcheck: 'false', oninput: onInput((v) => { f.value = { ...f.value, lang: v }; }) })),
         h('label', { class: 'mini grow' }, 'Description', h('input', { value: f.value.desc, disabled: dis, oninput: onInput((v) => { f.value = { ...f.value, desc: v }; }) }))),
       h('textarea', { rows: f.kind === 'lyrics' ? 10 : 3, value: f.value.text, disabled: dis, 'aria-label': f.label, oninput: onInput((v) => { f.value = { ...f.value, text: v }; }) }));
+  } else if (f.kind === 'vorbiskey') {
+    body = h('div', { class: 'stack' },
+      h('label', { class: 'mini grow' }, 'Field name', h('input', { value: f.value.name, disabled: dis, autocapitalize: 'characters', spellcheck: 'false', oninput: onInput((v) => { f.value = { ...f.value, name: v }; }) })),
+      h('textarea', { rows: 2, value: f.value.text, disabled: dis, 'aria-label': 'Custom field value', oninput: onInput((v) => { f.value = { ...f.value, text: v }; }) }));
   } else if (f.kind === 'usertext') {
     body = h('div', { class: 'stack' },
       h('label', { class: 'mini grow' }, 'Description', h('input', { value: f.value.desc, disabled: dis, autocapitalize: 'off', oninput: onInput((v) => { f.value = { ...f.value, desc: v }; }) })),
