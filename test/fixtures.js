@@ -434,3 +434,73 @@ export function coseSignature() {
   const unprot = new Map([['sigTst2', { tstTokens: [{ val: token }] }]]);
   return cbor(new CTag(18, [prot, unprot, null, new Uint8Array(64)]));
 }
+
+// ---- Images ----
+const be16 = (v) => u16be(v);
+function ifdEntry(tag, type, count, value) { return concat([be16(tag), be16(type), u32be(count), value]); }
+const pad4 = (b) => concat([b, new Uint8Array(4 - b.length)]);
+const rat = (n, d) => concat([u32be(n), u32be(d)]);
+
+// Big-endian TIFF: IFD0 (Make, Orientation=6, ExifIFD, GPS), Exif IFD (DateTimeOriginal), GPS IFD (29°56'12.34" N, 95°3'21" W).
+export function tiffWithGps() {
+  const ifd0 = concat([be16(4),
+    ifdEntry(0x010f, 2, 6, u32be(134)), ifdEntry(0x0112, 3, 1, pad4(be16(6))), ifdEntry(0x8769, 4, 1, u32be(62)), ifdEntry(0x8825, 4, 1, u32be(80)), u32be(0)]);
+  const exif = concat([be16(1), ifdEntry(0x9003, 2, 20, u32be(140)), u32be(0)]);
+  const gps = concat([be16(4), ifdEntry(1, 2, 2, pad4(latin1('N\0'))), ifdEntry(2, 5, 3, u32be(160)), ifdEntry(3, 2, 2, pad4(latin1('W\0'))), ifdEntry(4, 5, 3, u32be(184)), u32be(0)]);
+  const data = concat([latin1('Apple\0'), latin1('2024:05:06 07:08:09\0'), rat(29, 1), rat(56, 1), rat(1234, 100), rat(95, 1), rat(3, 1), rat(2100, 100)]);
+  return concat([latin1('MM'), be16(42), u32be(8), ifd0, exif, gps, data]);
+}
+
+export function jpegSeg(marker, payload) {
+  return concat([new Uint8Array([0xff, marker]), be16(payload.length + 2), payload]);
+}
+const JPEG_TABLES = () => [jpegSeg(0xdb, prng(31, 65)), jpegSeg(0xc0, concat([new Uint8Array([8]), be16(48), be16(64), new Uint8Array([3]), new Uint8Array(9)])), jpegSeg(0xc4, prng(32, 30))];
+export const JPEG_SCAN = concat([jpegSeg(0xda, new Uint8Array(10)), prng(33, 3000).map((x) => (x === 0xff ? 0x00 : x)), new Uint8Array([0xff, 0xd9])]);
+
+// JPEG: EXIF (with GPS), XMP, COM, C2PA in two APP11 segments with a sealed data hash.
+export function jpegFixture() {
+  const build = (start, length) => {
+    const store = manifestStore({ kind: 'data', start, length });
+    const k = 200;
+    const app11a = jpegSeg(0xeb, concat([latin1('JP'), be16(1), u32be(1), store.subarray(0, k)]));
+    const app11b = jpegSeg(0xeb, concat([latin1('JP'), be16(1), u32be(2), store.subarray(0, 8), store.subarray(k)]));
+    const pre = concat([new Uint8Array([0xff, 0xd8]), jpegSeg(0xe1, concat([latin1('Exif\0\0'), tiffWithGps()])),
+      jpegSeg(0xe1, concat([latin1('http://ns.adobe.com/xap/1.0/\0'), enc.encode('<x:xmpmeta><rdf:Description xmp:CreatorTool="Camera 1.0" exif:GPSLatitude="29,56N"/></x:xmpmeta>')])),
+      jpegSeg(0xfe, latin1('old comment'))]);
+    const file = concat([pre, app11a, app11b, ...JPEG_TABLES(), JPEG_SCAN]);
+    return { file, start: pre.length, length: app11a.length + app11b.length };
+  };
+  const a = build(0, 0);
+  const b = build(a.start, a.length);
+  return sealDataHash(b.file, b.start, b.length);
+}
+
+// JPEG with an MPF index followed by XMP; bytes after EOI stand in for the secondary image.
+export function jpegMpfFixture() {
+  const mpf = jpegSeg(0xe2, concat([latin1('MPF\0'), latin1('MM'), be16(42), u32be(8), be16(1), ifdEntry(0xb001, 4, 1, u32be(2)), u32be(0)]));
+  return concat([new Uint8Array([0xff, 0xd8]), jpegSeg(0xe1, concat([latin1('Exif\0\0'), tiffWithGps()])), mpf,
+    jpegSeg(0xe1, concat([latin1('http://ns.adobe.com/xap/1.0/\0'), enc.encode('<x:xmpmeta/>')])), ...JPEG_TABLES(), JPEG_SCAN, latin1('SECOND IMAGE')]);
+}
+
+export function pngChunk(type, data) {
+  const t = latin1(type);
+  return concat([u32be(data.length), t, data, u32be(crc32js(concat([t, data])))]);
+}
+function crc32js(b) {
+  let c = 0xffffffff;
+  for (const x of b) { c ^= x; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; }
+  return (c ^ 0xffffffff) >>> 0;
+}
+export const PNG_SIG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+// PNG: IHDR, eXIf (GPS), tEXt Comment, iTXt Title, zTXt Author, caBX C2PA, two IDAT, IEND.
+export function pngFixture(deflate) {
+  return concat([PNG_SIG,
+    pngChunk('IHDR', concat([u32be(64), u32be(48), new Uint8Array([8, 6, 0, 0, 0])])),
+    pngChunk('eXIf', tiffWithGps()),
+    pngChunk('tEXt', latin1('Comment\0' + SUNO_TEXT)),
+    pngChunk('iTXt', concat([latin1('Title\0\0\0\0\0'), enc.encode('Ünï title')])),
+    pngChunk('zTXt', concat([latin1('Author\0\0'), deflate(enc.encode('Zed'))])),
+    pngChunk('caBX', manifestStore({ kind: 'bmff' })),
+    pngChunk('IDAT', prng(41, 500)), pngChunk('IDAT', prng(42, 300)), pngChunk('IEND', new Uint8Array(0))]);
+}

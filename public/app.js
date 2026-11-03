@@ -94,6 +94,7 @@ function render() {
   renderEdit();
   renderPreserve();
   renderProtected();
+  renderSections();
   renderTechnical();
   refreshBar();
 }
@@ -241,7 +242,7 @@ function fieldShell(f, body) {
   const err = h('div', { class: 'err' });
   const revertBtn = h('button', { class: 'btn small', type: 'button', onclick: () => { revert(doc, f); render(); } }, f.isNew ? 'Discard' : 'Revert');
   const delBtn = f.deletable && !doc.readOnly && !f.isNew
-    ? h('button', { class: 'btn small danger', type: 'button', onclick: () => { f.deleted = !f.deleted; render(); } }, f.deleted ? 'Restore' : 'Delete')
+    ? h('button', { class: 'btn small danger', type: 'button', onclick: () => { f.deleted = !f.deleted; render(); } }, f.deleted ? 'Restore' : f.deleteLabel || 'Delete')
     : null;
   const wrap = h('div', { class: 'field', 'data-uid': f.uid },
     h('div', { class: 'field-head' },
@@ -277,6 +278,8 @@ function renderEditField(f) {
   let body;
   if (f.kind === 'picture') {
     body = renderPicture(f);
+  } else if (f.kind === 'readonly') {
+    body = h('div', { class: 'value' }, f.display);
   } else if (f.kind === 'comment' || f.kind === 'lyrics') {
     body = h('div', { class: 'stack' },
       h('div', { class: 'row' },
@@ -361,6 +364,15 @@ function renderProtected() {
       h('div', { class: 'field-head' }, h('span', { class: 'label' }, f.label), ...chips(f)),
       f.display ? h('div', { class: 'value' }, f.display) : null)),
   );
+}
+
+function renderSections() {
+  const box = $('sections');
+  const list = doc.sections || [];
+  box.hidden = !list.length;
+  fill(box, groupHeader('Details', 'Contents of the metadata blocks above.'), list.map((s) => h('details', { class: 'sub' },
+    h('summary', null, `${s.title} (${s.rows.length})`),
+    h('dl', { class: 'tech' }, s.rows.map(([k, v]) => [h('dt', null, k), h('dd', null, v)])))));
 }
 
 function renderTechnical() {
