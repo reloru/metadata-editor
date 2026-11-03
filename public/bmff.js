@@ -508,6 +508,47 @@ function lociText(buf, n) {
   return `${fx(o + 4).toFixed(5)}, ${fx(o).toFixed(5)}${fx(o + 8) ? `, ${fx(o + 8).toFixed(1)} m` : ''}`;
 }
 
+const QT_LABELS = {
+  'com.apple.quicktime.title': 'Title', 'com.apple.quicktime.description': 'Caption', 'com.apple.quicktime.keywords': 'Keywords',
+  'com.apple.quicktime.creationdate': 'Creation date', 'com.apple.quicktime.author': 'Author', 'com.apple.quicktime.artist': 'Artist',
+  'com.apple.quicktime.comment': 'Comment', 'com.apple.quicktime.make': 'Camera make', 'com.apple.quicktime.model': 'Camera model',
+  'com.apple.quicktime.software': 'Software', 'com.apple.quicktime.copyright': 'Copyright',
+};
+export const QT_ADDABLE = ['com.apple.quicktime.title', 'com.apple.quicktime.description', 'com.apple.quicktime.keywords', 'com.apple.quicktime.author', 'com.apple.quicktime.creationdate'];
+const qtShort = (k) => k.replace(/^com\.apple\.quicktime\./, '');
+
+function qtDataBox(value, locale) {
+  return makeBox('data', new Uint8Array([0, 0, 0, 1]), locale || new Uint8Array(4), encodeUtf8(value));
+}
+
+// Rebuild a keys/mdta meta box. edits: Map(item -> null | new text); adds: [{ key, value }]; keepKey filters keys.
+function rebuildQtMeta2(buf, q, { edits = new Map(), adds = [], keepKey = () => true } = {}) {
+  const names = [];
+  const index = new Map();
+  const keyIdx = (name) => { if (!index.has(name)) { names.push(name); index.set(name, names.length); } return index.get(name); };
+  const items = [];
+  for (const it of q ? q.items : []) {
+    if (edits.get(it.node) === null || !keepKey(it.key)) continue;
+    const idx = keyIdx(it.key);
+    let body = buf.subarray(it.node.start + it.node.hdr, it.node.start + it.node.size);
+    if (edits.has(it.node)) {
+      const d = it.node.children && it.node.children.find((x) => x.type === 'data');
+      body = qtDataBox(edits.get(it.node), d ? dataBox(buf, d).locale : null);
+    }
+    items.push(concat([u32beBytes(8 + body.length), u32beBytes(idx), body]));
+  }
+  for (const a of adds) {
+    const body = qtDataBox(a.value);
+    items.push(concat([u32beBytes(8 + body.length), u32beBytes(keyIdx(a.key)), body]));
+  }
+  const keyEntries = names.map((n) => { const s = encodeUtf8(n); return concat([u32beBytes(8 + s.length), fourccBytes('mdta'), s]); });
+  const keysBox = makeBox('keys', new Uint8Array(4), u32beBytes(names.length), ...keyEntries);
+  const ilstBox = makeBox('ilst', ...items);
+  if (!q) return makeBox('meta', makeBox('hdlr', new Uint8Array(8), fourccBytes('mdta'), new Uint8Array(13)), keysBox, ilstBox);
+  const parts = q.meta.children.map((c) => (c === q.keys ? keysBox : c === q.ilst ? ilstBox : buf.subarray(c.start, c.start + c.size)));
+  return wrapLike(buf, q.meta, concat([buf.subarray(q.meta.start + q.meta.hdr, q.meta.start + q.meta.hdr + q.meta.fb), ...parts]));
+}
+
 // Rebuild moov/meta keeping only the keys `keep` accepts; item indices are renumbered.
 function rebuildQtMeta(buf, q, keep) {
   const kept = q.names.map((name, i) => ({ name, idx: i + 1 })).filter((k) => keep(k.name));
@@ -570,7 +611,7 @@ export function detect(head) {
 export async function load(file) {
   const doc = {
     format: 'MP4', file, fields: [], technical: [], notes: [], c2pa: null, readOnly: null,
-    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null, udtaLocations: [], qtList: [],
+    top: [], moovBox: null, moovBuf: null, moov: null, trailingStart: null, udtaLocations: [], qtList: [], qtFields: [],
   };
   let o = 0;
   let brands = null;
@@ -684,6 +725,18 @@ export async function load(file) {
     const q = node.children ? qtKeys(buf, node) : null;
     if (q) {
       doc.qtList.push(q);
+      const qcount = {};
+      for (const it of q.items) qcount[it.key] = (qcount[it.key] || 0) + 1;
+      const seenK = {};
+      for (const it of q.items) {
+        if (LOCATION_KEY.test(it.key)) continue;
+        seenK[it.key] = (seenK[it.key] || 0) + 1;
+        const d = it.node.children && it.node.children.find((x) => x.type === 'data');
+        const text = d && dataBox(buf, d).type === 1;
+        const label = `${QT_LABELS[it.key] || qtShort(it.key)}${qcount[it.key] > 1 ? ` (${seenK[it.key]} of ${qcount[it.key]})` : ''}`;
+        doc.qtFields.push(makeField({ group: 'QuickTime', key: qtShort(it.key), label, qt: q, qtItem: it.node, qtKey: it.key,
+          ...(text ? { kind: it.value.length > 60 ? 'multiline' : 'text', value: it.value } : { cls: 'edit', kind: 'readonly', value: '', display: it.value }) }));
+      }
       doc.sections = doc.sections || [];
       const seen = {};
       const count = {};
@@ -710,12 +763,16 @@ export async function load(file) {
     if (c.type === 'mvhd') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie header (mvhd)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'trak') {
       const t = tracks[moov.children.filter((x) => x.type === 'trak').indexOf(c)];
-      if (t.face) {
+      if (t.entry === 'mebx' && !doc.readOnly) {
         let info = '';
         try { const r = sampleRanges(buf, c); info = `${r.count} sample${r.count === 1 ? '' : 's'}, ${formatBytes(r.bytes)}`; } catch { info = 'sample table unreadable'; }
-        moovFields.push(makeField({ cls: 'edit', kind: 'readonly', key: 'faces', label: 'Face-detection data', node: c, deleteLabel: 'Remove face data',
-          display: `Per-frame face positions, angles and face IDs · ${info}`,
-          note: 'Removing deletes this metadata track and blanks its samples in the file. Video, audio and the other tracks are unchanged.' }));
+        const warn = /video-orientation/.test(t.detail) ? ' Players may then show the video rotated.' : /live-photo-info/.test(t.detail) ? ' The video may no longer pair with its Live Photo still.' : '';
+        moovFields.push(t.face
+          ? makeField({ cls: 'edit', kind: 'readonly', key: 'faces', label: 'Face-detection data', node: c, deleteLabel: 'Remove face data',
+            display: `Per-frame face positions, angles and face IDs · ${info}`,
+            note: 'Removing deletes this metadata track and blanks its samples in the file. Video, audio and the other tracks are unchanged.' })
+          : makeField({ cls: 'edit', kind: 'readonly', key: 'mebx', label: `Timed metadata: ${t.detail || 'unknown'}`, node: c, deleteLabel: 'Remove track',
+            display: info, note: `Removing deletes this metadata track and blanks its samples.${warn}` }));
         continue;
       }
       moovFields.push(makeField({ cls: 'protected', kind: 'info', key: 'trak', label: t.entry === 'mebx' ? 'Track (timed metadata)' : `Track (${t.handler})`, deletable: false, display: `${t.entry}${t.detail ? ', ' + t.detail : ''}${TIMED_TEXT.has(t.handler) ? ' — timed text, read-only' : ''}` }));
@@ -747,6 +804,16 @@ export async function load(file) {
     }
   }
   doc.moovFields = moovFields;
+  if (!doc.readOnly && (hasVideo || doc.qtList.length)) {
+    const first = (k) => { for (const q of doc.qtList) { const it = q.items.find((x) => x.key === k); if (it) return it.value; } return ''; };
+    const vd = (v) => (v && !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/.test(v) ? 'Use YYYY-MM-DDTHH:MM:SS-06:00 (or Z)' : null);
+    doc.videoInfo = [
+      makeField({ group: 'Video info', key: 'caption', label: 'Caption', kind: 'multiline', value: first('com.apple.quicktime.description'), sync: 'caption', note: 'Saved to the QuickTime description.' }),
+      makeField({ group: 'Video info', key: 'keywords', label: 'Keywords', kind: 'text', value: first('com.apple.quicktime.keywords'), sync: 'keywords', note: 'Comma-separated, as Photos stores them.' }),
+      makeField({ group: 'Video info', key: 'taken', label: 'Date taken', kind: 'text', value: first('com.apple.quicktime.creationdate'), sync: 'taken', validate: vd,
+        placeholder: 'YYYY-MM-DDTHH:MM:SS-06:00', note: 'Saved to every QuickTime creation date and the movie header.' }),
+    ];
+  }
   const qtLoc = doc.qtList.flatMap((q) => q.items.filter((it) => LOCATION_KEY.test(it.key)));
   if (qtLoc.length || doc.udtaLocations.length) {
     const iso = qtLoc.find((it) => /ISO6709$/.test(it.key));
@@ -790,8 +857,9 @@ export async function load(file) {
 }
 
 function rebuildFieldList(doc) {
-  const out = [];
+  const out = [...(doc.videoInfo || [])];
   if (doc.locationField) out.push(doc.locationField);
+  out.push(...doc.qtFields);
   for (const b of doc.top) {
     if (b === doc.moovBox) out.push(...doc.ilstFields, ...doc.moovFields);
     else if (b.field) out.push(b.field);
@@ -804,10 +872,19 @@ function rebuildFieldList(doc) {
 export function addable(doc) {
   if (doc.readOnly) return [];
   const live = doc.ilstFields.filter((f) => !f.deleted);
-  return Object.keys(ITEM_EDIT).filter((k) => !live.some((f) => f.key === k)).map((k) => ({ key: k, label: ITEM_EDIT[k].label }));
+  const qtLive = doc.qtFields.filter((f) => !f.deleted);
+  const qt = doc.videoInfo ? QT_ADDABLE.filter((k) => !qtLive.some((f) => f.qtKey === k)).map((k) => ({ key: `QTKEY:${k}`, label: `${QT_LABELS[k]} (QuickTime)` })) : [];
+  return [...qt, ...Object.keys(ITEM_EDIT).filter((k) => !live.some((f) => f.key === k)).map((k) => ({ key: k, label: ITEM_EDIT[k].label }))];
 }
 
 export function addField(doc, key) {
+  if (key.startsWith('QTKEY:')) {
+    const k = key.slice(6);
+    const f = makeField({ group: 'QuickTime', key: qtShort(k), label: QT_LABELS[k] || qtShort(k), qtKey: k, isNew: true, kind: 'text', value: '' });
+    doc.qtFields.push(f);
+    rebuildFieldList(doc);
+    return f;
+  }
   const def = ITEM_EDIT[key];
   const f = makeField({
     key, group: 'ilst', isNew: true, label: def.label,
@@ -823,6 +900,7 @@ export function addField(doc, key) {
 }
 
 export function removeNewField(doc, f) {
+  if (f.qtKey) { doc.qtFields.splice(doc.qtFields.indexOf(f), 1); rebuildFieldList(doc); return; }
   doc.ilstFields.splice(doc.ilstFields.indexOf(f), 1);
   rebuildFieldList(doc);
 }
@@ -909,10 +987,42 @@ export async function build(doc, opts = {}) {
   };
 
   for (const f of doc.moovFields) if (f.node && f.deleted) replace(f.node, null);
-  if (doc.locationField && doc.locationField.deleted) {
-    for (const l of doc.udtaLocations) if (!ctx.replace.has(l.node)) replace(l.node, null);
-    for (const q of doc.qtList) {
-      if (q.names.some((k) => LOCATION_KEY.test(k)) && !ctx.replace.has(q.meta)) replace(q.meta, rebuildQtMeta(buf, q, (k) => !LOCATION_KEY.test(k)));
+  const dropLoc = !!(doc.locationField && doc.locationField.deleted);
+  if (dropLoc) for (const l of doc.udtaLocations) if (!ctx.replace.has(l.node)) replace(l.node, null);
+  // QuickTime keys: per-item edits, Video info (applied over them), additions and location removal.
+  const edits = new Map();
+  const adds = [];
+  for (const f of doc.qtFields) {
+    if (!isChanged(f)) continue;
+    if (f.isNew) { if (f.value !== '') adds.push({ key: f.qtKey, value: f.value }); continue; }
+    edits.set(f.qtItem, f.deleted ? null : f.value);
+  }
+  let newDate = null;
+  for (const s of (doc.videoInfo || []).filter(isChanged)) {
+    const key = { caption: 'com.apple.quicktime.description', keywords: 'com.apple.quicktime.keywords', taken: 'com.apple.quicktime.creationdate' }[s.sync];
+    const v = s.deleted || s.value === '' ? null : s.value;
+    let found = false;
+    for (const q of doc.qtList) for (const it of q.items) if (it.key === key) { edits.set(it.node, v); found = true; }
+    for (const a of adds.filter((x) => x.key === key)) adds.splice(adds.indexOf(a), 1);
+    if (!found && v !== null) adds.push({ key, value: v });
+    if (s.sync === 'taken' && v !== null) newDate = v;
+  }
+  for (const q of doc.qtList) {
+    const touched = q.items.some((it) => edits.has(it.node)) || (dropLoc && q.names.some((k) => LOCATION_KEY.test(k))) || (q === doc.qtList[0] && adds.length);
+    if (touched && !ctx.replace.has(q.meta)) {
+      replace(q.meta, rebuildQtMeta2(buf, q, { edits, adds: q === doc.qtList[0] ? adds : [], keepKey: (k) => !(dropLoc && LOCATION_KEY.test(k)) }));
+    }
+  }
+  if (!doc.qtList.length && adds.length) add(doc.moov, rebuildQtMeta2(buf, null, { adds }));
+  if (newDate) {
+    const mv = child(doc.moov, 'mvhd');
+    const ms = Date.parse(newDate.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+    if (mv && Number.isFinite(ms)) {
+      const secs = Math.round((ms - Date.UTC(1904, 0, 1)) / 1000);
+      const b = buf.slice(mv.start, mv.start + mv.size);
+      const p = mv.hdr;
+      if (b[p] === 1) { putU64be(b, p + 4, secs); putU64be(b, p + 12, secs); } else if (secs >= 0 && secs <= 0xffffffff) { putU32be(b, p + 4, secs); putU32be(b, p + 8, secs); }
+      replace(mv, b);
     }
   }
 
