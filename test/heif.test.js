@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as F from './fixtures.js';
 import { open, save, find } from './helpers.js';
-import { addable, buildOutput } from '../public/editor.js';
+import { addable, addField, buildOutput } from '../public/editor.js';
 import { parseMoov, readChunkOffsets } from '../public/bmff.js';
 
 const { concat, latin1, enc, u32be, u16be, bbox, full, prng } = F;
@@ -27,14 +27,14 @@ function heic(brand = 'heic') {
   return build(a.exifAt, a.imageAt).file;
 }
 
-test('HEIC: EXIF item read through iinf/iloc; dimensions from ispe; view-only', async () => {
+test('HEIC: EXIF item read through iinf/iloc; dimensions from ispe; EXIF addable', async () => {
   const doc = await open(heic());
   assert.equal(doc.format, 'HEIC');
   assert.equal(Object.fromEntries(doc.technical).Dimensions, '4032×3024');
   assert.deepEqual(doc.sections[0].rows.find((r) => r[0] === 'Camera'), ['Camera', 'Apple']);
   assert.match(find(doc, 'GPS').display, /N, .* W/);
   assert.equal(find(doc, 'Exif').deletable, false);
-  assert.deepEqual(addable(doc), []);
+  assert.ok(addable(doc).some((x) => x.key === 'EXIFTAG:ifd0:270'));
   assert.equal((await open(heic('avif'))).format, 'AVIF');
 });
 
@@ -181,4 +181,21 @@ test('MOV: repeated QuickTime keys are numbered and differing values flagged', a
   const doc = await open(concat([bbox('ftyp', latin1('qt  '), u32be(0), latin1('qt  ')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), meta), bbox('mdat', new Uint8Array(8))]));
   assert.deepEqual(doc.sections[0].rows.map((r) => r[0]), ['creationdate (1 of 2)', 'creationdate (2 of 2)']);
   assert.ok(doc.notes.some((n) => /2 different creationdate values/.test(n)));
+});
+
+test('HEIC: EXIF edits go into an appended item; iloc patched; old item zeroed; image bytes untouched', async () => {
+  const before = heic();
+  const doc = await open(before);
+  addField(doc, 'EXIFTAG:ifd0:270').value = 'HEIC caption ✓';
+  find(doc, 'Make').value = 'Edited';
+  find(doc, 'GPS').deleted = true;
+  const out = await save(doc);
+  assert.ok(out.length > before.length);
+  assert.deepEqual(out.subarray(before.length - 400, before.length), before.subarray(before.length - 400), 'image item bytes unchanged');
+  assert.equal(F.indexOf(out.subarray(0, before.length), latin1('Apple\0')), -1, 'old EXIF zeroed');
+  const re = await open(out);
+  assert.equal(find(re, 'ImageDescription').value, 'HEIC caption ✓');
+  assert.equal(find(re, 'Make').value, 'Edited');
+  assert.equal(re.fields.find((f) => f.key === 'GPS'), undefined);
+  assert.equal(Object.fromEntries(re.technical).Dimensions, '4032×3024');
 });

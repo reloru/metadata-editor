@@ -7,6 +7,7 @@ import { decodeUtf8 } from './text.js';
 import { makeField } from './fields.js';
 import { parseTiff, exifRows, gpsSummary, removeGps, gpsWithin, gpsTimeNote, STRIPPED_NOTE, NO_EXIF_NOTE } from './tiff.js';
 import { xmpInfo } from './image.js';
+import { exifTagFields, exifAddable, newExifField, exifChanged, writeExifParts } from './exifedit.js';
 
 const HEAD = 4 * 1048576;
 
@@ -38,8 +39,8 @@ export async function load(file) {
   const date = rows.find((r) => r[0] === 'Date taken');
   if (!t.exif && !ptr) doc.notes.push(NO_EXIF_NOTE);
   else if (!cam && !date && !gps) doc.notes.push(STRIPPED_NOTE);
+  try { doc.exifEdit = { fields: exifTagFields(head, 'EXIF', { imageFile: true }) }; } catch { doc.exifEdit = null; }
   const fields = [];
-  if (doc.gpsField) fields.push(doc.gpsField);
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'EXIF', label: 'EXIF (TIFF tags)', deletable: false,
     display: [cam && cam[1], date && date[1], gps ? 'GPS' : null].filter(Boolean).join(' · ') || 'basic tags only' }));
   const xe = t.ifd0.entries.get(0x02bc);
@@ -50,8 +51,9 @@ export async function load(file) {
     fields.push(makeField({ cls: 'protected', kind: 'info', key: 'XMP', label: 'XMP', deletable: false, display: `${x.rows.length} properties · ${formatBytes(xe.size)}` }));
   }
   fields.push(makeField({ cls: 'protected', kind: 'info', key: 'data', label: dng ? 'Raw image data and previews' : 'Image data', deletable: false, display: formatBytes(file.size) }));
-  doc.fields = fields;
-  doc.notes.push(doc.gpsField ? `${doc.format} files are view-only except for removing the EXIF location.` : `${doc.format} files are view-only. This file has no EXIF location.`);
+  doc.otherFields = fields;
+  collect(doc);
+  doc.notes.push(`${doc.format}: EXIF and descriptive tags can be edited; image tags and data are never touched.`);
   const w = t.ifd0.entries.get(0x100);
   const h = t.ifd0.entries.get(0x101);
   doc.technical.push(['Container', `${doc.format} (${t.le ? 'little' : 'big'}-endian)`]);
@@ -62,11 +64,27 @@ export async function load(file) {
   return doc;
 }
 
-export function addable() { return []; }
-export function addField() { throw new Error('Fields cannot be added to TIFF/DNG files'); }
-export function removeNewField() {}
+function collect(doc) {
+  doc.fields = [...(doc.gpsField ? [doc.gpsField] : []), ...(doc.exifEdit ? doc.exifEdit.fields : []), ...doc.otherFields];
+}
+export function addable(doc) { return doc.exifEdit ? exifAddable(doc.exifEdit.fields) : []; }
+export function addField(doc, key) {
+  const f = newExifField(key, 'EXIF');
+  doc.exifEdit.fields.push(f);
+  collect(doc);
+  return f;
+}
+export function removeNewField(doc, f) {
+  doc.exifEdit.fields.splice(doc.exifEdit.fields.indexOf(f), 1);
+  collect(doc);
+}
 
 export async function build(doc) {
+  if (doc.exifEdit && exifChanged(doc.exifEdit.fields, null)) {
+    // New IFDs and values are appended at the end of the file (TIFF offsets are file offsets).
+    const { head, tail } = writeExifParts(doc.head, doc.exifEdit.fields, { dropGps: !!(doc.gpsField && doc.gpsField.deleted), appendAt: doc.file.size });
+    return [head, doc.file.slice(head.length), tail];
+  }
   if (!(doc.gpsField && doc.gpsField.deleted)) return [doc.file];
   const head = removeGps(doc.head);
   if (!head) return [doc.file];

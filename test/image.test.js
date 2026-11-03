@@ -316,3 +316,17 @@ test('XMP values decode XML entities', async () => {
   const x = xmpInfo('<rdf:Description><dc:description><rdf:Alt><rdf:li xml:lang="x-default">Hii He l 85)&amp;:#^%}?gi &lt;3 &#x1F600;</rdf:li></rdf:Alt></dc:description></rdf:Description>');
   assert.deepEqual(x.rows, [['dc:description', 'Hii He l 85)&:#^%}?gi <3 😀']]);
 });
+
+test('DNG/TIFF: EXIF edits appended at the end of the file; image data untouched', async () => {
+  const before = dngFixture();
+  const doc = await open(before);
+  addField(doc, 'EXIFTAG:ifd0:270').value = 'DNG caption';
+  find(doc, 'DateTimeOriginal').value = '2026:11:03 14:12:55';
+  const out = await save(doc);
+  assert.ok(out.length > before.length);
+  assert.deepEqual(out.subarray(400, before.length), before.subarray(400));
+  const re = await open(out);
+  assert.equal(find(re, 'ImageDescription').value, 'DNG caption');
+  assert.equal(find(re, 'DateTimeOriginal').value, '2026:11:03 14:12:55');
+  assert.ok(find(re, 'GPS'));
+});

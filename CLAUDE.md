@@ -16,7 +16,7 @@ Static web app (PWA) served by a Cloudflare Worker. Reads and edits metadata in 
 - Detect format by magic bytes, not extension.
 - Ogg: comment edits are re-laced into the same number of header pages (audio pages untouched); edits that do not fit are refused rather than re-paginating the file (owner may choose otherwise).
 - EXIF edits are append-only: changed IFDs/values go after the existing TIFF data, pointers are updated, replaced bytes are zeroed. Never rebuild a TIFF (MakerNote and thumbnail offsets can be absolute).
-- HEIF items are addressed by absolute offsets (iloc): only same-length in-place rewrites are allowed there.
+- HEIF items are addressed by absolute offsets (iloc): never change the meta box size. Edited EXIF goes into a new mdat at the end of the file, the item's iloc offset/length are patched in place, the old item is zeroed.
 - JPEG with an MPF index: segments after the index must not change size (MPF offsets are relative to it); new segments go before it.
 - The owner works only from an iPhone. Target mobile Safari first.
 - Read current Cloudflare/wrangler docs before writing config; don't guess keys. Cloudflare credentials are in env: never print, log, or commit them.
