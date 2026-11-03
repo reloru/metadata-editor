@@ -25,7 +25,7 @@ function validateKey(v) {
   return /^[\x20-\x3c\x3e-\x7d]+$/.test(v) ? null : 'Field names are ASCII without "="';
 }
 
-function parseComments(d) {
+export function parseComments(d) {
   const vlen = u32le(d, 0);
   const vendor = decodeUtf8(d.subarray(4, 4 + vlen));
   let o = 4 + vlen;
@@ -42,9 +42,13 @@ function parseComments(d) {
   return { vendor, entries };
 }
 
-function commentField(key, values, extra = {}) {
+export function commentField(key, values, extra = {}) {
   const up = key.toUpperCase();
   const multi = values.length > 1;
+  if (up === 'METADATA_BLOCK_PICTURE') {
+    return makeField({ key: up, vkey: key, group: 'Vorbis', cls: 'preserve', kind: 'info', label: 'Embedded picture (Vorbis comment)', multi, value: values.join('\n'),
+      display: `${values.length} picture${values.length === 1 ? '' : 's'}, ${formatBytes(values.reduce((n, v) => n + v.length, 0))} base64`, ...extra });
+  }
   return makeField({
     key: up, vkey: key, group: 'Vorbis', label: COMMENT_FIELDS[up] || key, multi,
     kind: multi || MULTILINE.has(up) ? 'multiline' : 'text', value: values.join('\n'),
@@ -163,10 +167,28 @@ function makeAudioField(doc) {
   return doc.audioField;
 }
 
-export function addable(doc) {
-  const live = doc.vorbis ? doc.vorbis.fields.filter((f) => !f.deleted) : [];
+export function commentAddable(v) {
+  const live = v ? v.fields.filter((f) => !f.deleted) : [];
   const out = Object.keys(COMMENT_FIELDS).filter((k) => !live.some((f) => f.key === k)).map((k) => ({ key: k, label: COMMENT_FIELDS[k] }));
   out.push({ key: '*custom', label: 'Custom field…' });
+  return out;
+}
+
+// New Vorbis comment field (standard key or '*custom') added to v.fields.
+export function newCommentField(v, key) {
+  let f;
+  if (key === '*custom') {
+    f = makeField({ key: '*custom', group: 'Vorbis', label: 'Custom field', kind: 'vorbiskey', value: { name: '', text: '' }, isNew: true,
+      validate: (val) => validateKey(val.name) || (v.fields.some((g) => g !== f && !g.deleted && g.key === val.name.toUpperCase()) ? 'That field already exists' : null) });
+  } else {
+    f = commentField(key, [''], { isNew: true });
+  }
+  v.fields.push(f);
+  return f;
+}
+
+export function addable(doc) {
+  const out = commentAddable(doc.vorbis);
   if (!doc.fields.some((f) => f.key === 'PICTURE' && !f.deleted && f.value && f.value.ptype === 3)) out.push({ key: 'PICTURE', label: 'Front cover' });
   return out;
 }
@@ -178,13 +200,7 @@ export function addField(doc, key) {
     doc.newFields.push(f);
   } else {
     if (!doc.vorbis) doc.vorbis = { block: null, vendor: 'metadata-editor', entries: [], fields: [] };
-    if (key === '*custom') {
-      f = makeField({ key: '*custom', group: 'Vorbis', label: 'Custom field', kind: 'vorbiskey', value: { name: '', text: '' }, isNew: true,
-        validate: (v) => validateKey(v.name) || (doc.vorbis.fields.some((g) => g !== f && !g.deleted && g.key === v.name.toUpperCase()) ? 'That field already exists' : null) });
-    } else {
-      f = commentField(key, [''], { isNew: true });
-    }
-    doc.vorbis.fields.push(f);
+    f = newCommentField(doc.vorbis, key);
   }
   collect(doc);
   return f;
@@ -201,7 +217,8 @@ function fieldValues(f) {
   return { key: f.vkey || f.key, values: lines.length ? lines : [''] };
 }
 
-function vorbisBlock(v) {
+// Vorbis comment body (vendor + entries) from the field list, keeping original key order.
+export function vorbisBlock(v) {
   const entries = [];
   const done = new Set();
   const byKey = new Map(v.fields.filter((f) => f.kind !== 'vorbiskey').map((f) => [f.key, f]));
