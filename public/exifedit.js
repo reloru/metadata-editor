@@ -170,6 +170,8 @@ export function exifTagFields(b, group, opts = {}) {
     if (!ifd) continue;
     for (const e of [...ifd.entries.values()].sort((a, c) => a.tag - c.tag)) {
       if (POINTERS.has(e.tag) || (name === 'ifd0' && e.tag === 0x02bc)) continue;
+      // In TIFF/DNG files IFD0 also describes the image itself; only descriptive tags are offered there.
+      if (opts.imageFile && name === 'ifd0' && !TAGS.ifd0[e.tag]) continue;
       const text = opts.readOnly ? null : rawText(b, r, e);
       const base = { group, key: tagName(name, e.tag), label: tagLabel(name, e.tag), exifTag: { ifd: name, tag: e.tag, type: e.type } };
       if (text === null) {
@@ -180,7 +182,7 @@ export function exifTagFields(b, group, opts = {}) {
       }
     }
   }
-  if (t.ifd0 && t.ifd0.next) {
+  if (t.ifd0 && t.ifd0.next && !opts.imageFile) {
     try {
       const ifd1 = readIfd(b, r, t.ifd0.next);
       const len = ifd1 && ifd1.entries.get(0x0202);
@@ -210,13 +212,20 @@ export function exifChanged(fields, gpsField) {
 }
 
 // Apply field edits to a TIFF. Returns the new bytes (never shorter than the input).
-export function writeExif(src, fields, { dropGps = false } = {}) {
+export function writeExif(src, fields, opts = {}) {
+  const { head, tail } = writeExifParts(src, fields, opts);
+  return concat([head, tail]);
+}
+
+// As writeExif, but new data is addressed from appendAt (default: the end of src) and returned separately,
+// for TIFF files where src is only the start of a larger file.
+export function writeExifParts(src, fields, { dropGps = false, appendAt = src.length } = {}) {
   const t = parseTiff(src);
   const r = reader(src);
   const le = r.le;
   const out = src.slice();
   const tail = [];
-  let pos = src.length;
+  let pos = appendAt;
   const put = (bytes) => {
     if (pos & 1) { tail.push(new Uint8Array(1)); pos++; }
     const at = pos;
@@ -286,8 +295,8 @@ export function writeExif(src, fields, { dropGps = false } = {}) {
     } catch { /* leave as is */ }
     next = 0;
   }
-  if (!edits.ifd0.size && next === (t.ifd0 ? t.ifd0.next : 0)) return concat([out, ...tail]);
+  if (!edits.ifd0.size && next === (t.ifd0 ? t.ifd0.next : 0)) return { head: out, tail: concat(tail) };
   const at0 = rewrite(t.ifd0, edits.ifd0, next);
   w32(out, 4, at0);
-  return concat([out, ...tail]);
+  return { head: out, tail: concat(tail) };
 }
