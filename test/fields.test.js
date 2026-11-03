@@ -313,3 +313,24 @@ test('Unsupported formats get a clear "not supported yet" message', async () => 
   ];
   for (const [bytes, re] of cases) await assert.rejects(open(bytes), re);
 });
+
+test('Audio sweep: every ID3 text/URL frame, MP4 text/freeform item and WAV INFO item is editable', async () => {
+  const bytes = mp3(4, [frame(4, 'TSSE', textData(4, 'Lavf')), frame(4, 'TENC', textData(4, 'x')), frame(4, 'WCOM', latin1('http://a'))]);
+  const d1 = await open(bytes);
+  find(d1, 'TSSE').value = 'Edited enc';
+  find(d1, 'WCOM').value = 'https://b.example';
+  const r1 = await open(await save(d1));
+  assert.equal(find(r1, 'TSSE').value, 'Edited enc');
+  assert.equal(find(r1, 'WCOM').value, 'https://b.example');
+  const ff = bbox('----', full('mean', 0, 0, latin1('com.apple.iTunes')), full('name', 0, 0, latin1('MOOD')), dataBox(1, enc.encode('calm')));
+  const d2 = await open(m4a([dataItem(A9 + 'too', 1, enc.encode('Lavf')), ff]));
+  find(d2, A9 + 'too').value = 'Tool 2';
+  find(d2, '----').value = 'happy';
+  const r2 = await open(await save(d2));
+  assert.equal(find(r2, A9 + 'too').value, 'Tool 2');
+  assert.equal(find(r2, '----').value, 'happy');
+  assert.equal(find(r2, '----').label, 'MOOD (freeform)');
+  const d3 = await open(F.fixtureWavOdd());
+  find(d3, 'ISFT').value = 'New software';
+  assert.equal(find(await open(await save(d3)), 'ISFT').value, 'New software');
+});

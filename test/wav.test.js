@@ -29,7 +29,7 @@ test('WAV: every INFO field round-trips, including non-ASCII; sizes and pads con
   for (const [k, v] of Object.entries(vals)) assert.equal(find(re, k).value, v, k);
   assert.equal(find(re, 'IPRD').label, 'Product / Album');
   assert.deepEqual(dataChunk(out), dataChunk(before), 'payload identical');
-  assert.equal(find(re, 'ISFT').display, 'Lavf60.3.100');
+  assert.equal(find(re, 'ISFT').value, 'Lavf60.3.100');
 });
 
 test('WAV: ICRD validation (YYYY-MM-DD)', async () => {
@@ -43,10 +43,10 @@ test('WAV: ICRD validation (YYYY-MM-DD)', async () => {
   assert.deepEqual(errors(doc), []);
 });
 
-test('WAV: INFO ISRC is "Source" (Preserve), never an ISRC code field', async () => {
+test('WAV: INFO ISRC is "Source" (plain text), never an ISRC code field', async () => {
   const doc = await open(F.fixtureWavOdd());
   const f = find(doc, 'ISRC');
-  assert.equal(f.cls, 'preserve');
+  assert.equal(f.validate, null);
   assert.match(f.label, /^Source/);
   assert.ok(!addable(doc).some((a) => a.key === 'INFO:ISRC'));
 });

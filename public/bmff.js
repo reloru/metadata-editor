@@ -242,12 +242,20 @@ function itemFields(buf, item, timedText) {
     const val = datas[0] ? decodeData(dataBox(buf, datas[0])) : '';
     const m = mean ? stringBox(buf, mean) : '';
     const nm = name ? stringBox(buf, name) : '';
-    return [makeField({ ...base, cls: 'preserve', kind: 'info', label: `Freeform: ${nm}`, display: `${m} · ${nm} = ${val}`, freeform: { mean: m, name: nm, value: val } })];
+    const ff = { mean: m, name: nm, value: val };
+    if (datas.length === 1 && TEXT_TYPES.has(dataBox(buf, datas[0]).type)) {
+      return [makeField({ ...base, label: `${nm} (freeform)`, kind: val.length > 60 || val.includes('\n') ? 'multiline' : 'text', value: val, freeform: ff, note: m !== 'com.apple.iTunes' ? m : null })];
+    }
+    return [makeField({ ...base, cls: 'preserve', kind: 'info', label: `Freeform: ${nm}`, display: `${m} · ${nm} = ${val}`, freeform: ff })];
   }
   const decodeItem = (dn) => {
     const d = dataBox(buf, dn);
     return decodeData(d.type === 0 && INT_ITEMS.has(type) ? { ...d, type: 22 } : d);
   };
+  if (!def && datas.length === 1 && TEXT_TYPES.has(dataBox(buf, datas[0]).type)) {
+    const v = decodeData(dataBox(buf, datas[0]));
+    return [makeField({ ...base, label: `${ITEM_PRESERVE[type] || 'Item'} (${type})`, kind: v.length > 60 || v.includes('\n') ? 'multiline' : 'text', value: v })];
+  }
   if (!def) {
     let val = datas.map(decodeItem).join(' / ');
     if (type === 'gnre' && /^\d+$/.test(val) && gnreName(Number(val))) val = `${gnreName(Number(val))} (${val})`;
@@ -295,7 +303,7 @@ function itemFields(buf, item, timedText) {
 }
 
 function encodeItemData(f, origData, value = f.value) {
-  const def = ITEM_EDIT[f.key];
+  const def = ITEM_EDIT[f.key] || {};
   const locale = origData ? origData.locale : new Uint8Array(4);
   const v = value;
   let type;
@@ -841,7 +849,7 @@ export async function load(file) {
   doc.technical.push(['Duration', duration]);
   if (doc.created) doc.technical.push(['Created (mvhd)', doc.created]);
   tracks.forEach((t, i) => doc.technical.push([`Track ${i + 1}`, [t.handler, CODECS[t.entry] ? `${t.entry} (${CODECS[t.entry]})` : t.entry, t.detail, ...t.stats, t.name].filter(Boolean).join(' · ')]));
-  for (const f of doc.ilstFields) if (f.key === '©too') doc.technical.push(['Encoder (©too)', f.display]);
+  for (const f of doc.ilstFields) if (f.key === '©too') doc.technical.push(['Encoder (©too)', f.value || f.display]);
   const smpb = doc.ilstFields.find((f) => f.freeform && f.freeform.name === 'iTunSMPB');
   if (smpb) {
     const w = smpb.freeform.value.trim().split(/\s+/).map((x) => parseInt(x, 16));
