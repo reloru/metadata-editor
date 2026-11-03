@@ -685,7 +685,23 @@ export async function load(file) {
     if (q) {
       doc.qtList.push(q);
       doc.sections = doc.sections || [];
-      doc.sections.push({ title: `QuickTime metadata (${where} keys)`, rows: q.items.map((it) => [it.key.replace(/^com\.apple\.quicktime\./, ''), it.value]) });
+      const seen = {};
+      const count = {};
+      for (const it of q.items) count[it.key] = (count[it.key] || 0) + 1;
+      const rows = q.items.map((it) => {
+        const name = it.key.replace(/^com\.apple\.quicktime\./, '');
+        if (count[it.key] < 2) return [name, it.value];
+        seen[it.key] = (seen[it.key] || 0) + 1;
+        return [`${name} (${seen[it.key]} of ${count[it.key]})`, it.value];
+      });
+      doc.sections.push({ title: `QuickTime metadata (${where} keys)`, rows });
+      for (const k of Object.keys(count)) {
+        const vals = [...new Set(q.items.filter((it) => it.key === k).map((it) => it.value))];
+        if (vals.length > 1) {
+          const name = k.replace(/^com\.apple\.quicktime\./, '');
+          doc.notes.push(`This video has ${count[k]} different ${name} values (${vals.join(' and ')}). One was probably set later, for example with Photos' Adjust; apps may show either.`);
+        }
+      }
     }
     return makeField({ cls: 'preserve', kind: 'info', key: 'meta', label: `QuickTime metadata (${where} keys)`, node,
       display: q ? `${q.items.length} items${q.items.some((it) => LOCATION_KEY.test(it.key)) ? ', includes location' : ''} · ${sizeOf(node)}` : sizeOf(node) });
