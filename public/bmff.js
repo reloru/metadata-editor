@@ -327,6 +327,45 @@ function encodeItemData(f, origData, value = f.value) {
 
 // ---- udta text boxes and per-track statistics ----
 
+// Display rotation from the tkhd matrix (a, b, c, d in 16.16), in degrees clockwise.
+function trackRotation(buf, trak) {
+  const t = child(trak, 'tkhd');
+  if (!t) return 0;
+  const p = t.start + t.hdr;
+  const m = p + (buf[p] === 1 ? 52 : 40);
+  if (m + 16 > t.start + t.size) return 0;
+  const a = u32be(buf, m) | 0;
+  const b = u32be(buf, m + 4) | 0;
+  const deg = Math.round((Math.atan2(b, a) * 180) / Math.PI);
+  return ((deg % 360) + 360) % 360;
+}
+
+// Key names of a QuickTime timed-metadata ('mebx') sample entry: keys/<local id>/keyd (namespace + name).
+function mebxKeys(buf, stsd, e) {
+  const end = Math.min(stsd.start + stsd.size, e + u32be(buf, e));
+  const names = [];
+  let o = e + 16;
+  while (o + 8 <= end) {
+    const size = u32be(buf, o);
+    if (size < 8 || o + size > end) break;
+    if (fourcc(buf, o + 4) === 'keys') {
+      for (let k = o + 8; k + 8 <= o + size;) {
+        const ks = u32be(buf, k);
+        if (ks < 8) break;
+        for (let d = k + 8; d + 8 <= k + ks;) {
+          const ds = u32be(buf, d);
+          if (ds < 8) break;
+          if (fourcc(buf, d + 4) === 'keyd' && ds > 12) names.push(decodeUtf8(buf.subarray(d + 12, d + ds)));
+          d += ds;
+        }
+        k += ks;
+      }
+    }
+    o += size;
+  }
+  return names;
+}
+
 const CODECS = { avc1: 'H.264', avc3: 'H.264', hvc1: 'HEVC', hev1: 'HEVC', dvh1: 'Dolby Vision HEVC', av01: 'AV1', vp09: 'VP9', mp4a: 'AAC/MPEG audio',
   alac: 'Apple Lossless', 'ac-3': 'AC-3', 'ec-3': 'E-AC-3', Opus: 'Opus', fLaC: 'FLAC', 'mp4v': 'MPEG-4 Visual', apcn: 'ProRes 422', apch: 'ProRes 422 HQ', ap4h: 'ProRes 4444' };
 const TGPP = { titl: 'Title', auth: 'Author', dscp: 'Description', perf: 'Performer', gnre: 'Genre', cprt: 'Copyright', albm: 'Album', kywd: 'Keywords', yrrc: 'Recording year' };
@@ -554,6 +593,7 @@ export async function load(file) {
   // Tracks.
   const tracks = [];
   let timedText = false;
+  let faceTrack = false;
   let hasVideo = false;
   for (const trak of moov.children.filter((c) => c.type === 'trak')) {
     const hdlr = path(trak, 'mdia', 'hdlr');
@@ -565,13 +605,24 @@ export async function load(file) {
       const e = stsd.start + stsd.hdr + 8;
       entry = fourcc(buf, e + 4);
       if (handler === 'soun' && e + 36 <= stsd.start + stsd.size) detail = `${u16be(buf, e + 24)} ch, ${soundRate(buf, trak, stsd, e)} Hz, ${u16be(buf, e + 26)}-bit`;
-      if (handler === 'vide' && e + 36 <= stsd.start + stsd.size) detail = `${u16be(buf, e + 32)}×${u16be(buf, e + 34)}`;
+      if (handler === 'vide' && e + 36 <= stsd.start + stsd.size) {
+        const w = u16be(buf, e + 32);
+        const h = u16be(buf, e + 34);
+        const rot = trackRotation(buf, trak);
+        detail = rot ? `${w}×${h}, rotated ${rot}° (shows as ${rot % 180 ? `${h}×${w}` : `${w}×${h}`})` : `${w}×${h}`;
+      }
+      if (entry === 'mebx') {
+        const keys = mebxKeys(buf, stsd, e);
+        if (keys.length) detail = keys.map((k) => k.replace(/^com\.apple\.quicktime\./, '')).join(', ');
+        if (keys.some((k) => /detected-face/.test(k))) faceTrack = true;
+      }
     }
     if (TIMED_TEXT.has(handler)) timedText = true;
     if (handler === 'vide') hasVideo = true;
     tracks.push({ handler, entry, detail, stats: trackStats(buf, trak, handler), name: hdlr ? handlerName(buf, hdlr) : '' });
   }
   doc.format = hasVideo ? (brands && brands.major === 'qt  ' ? 'MOV' : 'MP4') : 'M4A';
+  if (faceTrack) doc.notes.push('This video has a face-detection metadata track (face positions and angles per frame). Removing it is not supported yet.');
   doc.timedText = timedText;
 
   // Metadata path.
@@ -610,7 +661,7 @@ export async function load(file) {
     if (c.type === 'mvhd') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie header (mvhd)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'trak') {
       const t = tracks[moov.children.filter((x) => x.type === 'trak').indexOf(c)];
-      moovFields.push(makeField({ cls: 'protected', kind: 'info', key: 'trak', label: `Track (${t.handler})`, deletable: false, display: `${t.entry}${t.detail ? ', ' + t.detail : ''}${TIMED_TEXT.has(t.handler) ? ' — timed text, read-only' : ''}` }));
+      moovFields.push(makeField({ cls: 'protected', kind: 'info', key: 'trak', label: t.entry === 'mebx' ? 'Track (timed metadata)' : `Track (${t.handler})`, deletable: false, display: `${t.entry}${t.detail ? ', ' + t.detail : ''}${TIMED_TEXT.has(t.handler) ? ' — timed text, read-only' : ''}` }));
     } else if (c.type === 'mvex') moovFields.push(makeField({ cls: 'protected', kind: 'info', key: c.type, label: 'Movie extends (mvex)', deletable: false, display: sizeOf(c) }));
     else if (c.type === 'udta' && c.children) {
       for (const u of c.children) {
@@ -667,6 +718,11 @@ export async function load(file) {
   if (doc.created) doc.technical.push(['Created (mvhd)', doc.created]);
   tracks.forEach((t, i) => doc.technical.push([`Track ${i + 1}`, [t.handler, CODECS[t.entry] ? `${t.entry} (${CODECS[t.entry]})` : t.entry, t.detail, ...t.stats, t.name].filter(Boolean).join(' · ')]));
   for (const f of doc.ilstFields) if (f.key === '©too') doc.technical.push(['Encoder (©too)', f.display]);
+  const smpb = doc.ilstFields.find((f) => f.freeform && f.freeform.name === 'iTunSMPB');
+  if (smpb) {
+    const w = smpb.freeform.value.trim().split(/\s+/).map((x) => parseInt(x, 16));
+    if (w.length >= 4 && w.every(Number.isFinite)) doc.technical.push(['Gapless (iTunSMPB)', `${w[1]} samples delay, ${w[2]} samples padding, ${w[3]} samples`]);
+  }
   const mdats = doc.top.filter((b) => b.type === 'mdat');
   const layout = doc.top.map((b) => b.type).join(' · ');
   doc.technical.push(['Layout', layout]);
