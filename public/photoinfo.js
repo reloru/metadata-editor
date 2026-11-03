@@ -45,8 +45,11 @@ export function photoInfoFields(doc) {
     const m = x && /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.\d+)?([+-]\d{2}:\d{2})?/.exec(val(x));
     if (m) date = `${m[1]} ${m[2]}${m[3] ? ' ' + m[3] : ''}`;
   }
+  const real = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
+  const bad = real && (+real[1] < 1 || +real[2] < 1 || +real[2] > 12 || +real[3] < 1 || +real[3] > new Date(Date.UTC(+real[1], +real[2], 0)).getUTCDate());
   out.push(makeField({ group: 'Photo info', key: 'taken', label: 'Date taken', kind: 'text', value: date, sync: 'taken', validate: validateDate,
-    placeholder: 'YYYY-MM-DD HH:MM:SS +HH:MM', note: 'Saved to every date-taken copy (EXIF original and digitized, XMP).' }));
+    placeholder: 'YYYY-MM-DD HH:MM:SS +HH:MM',
+    note: `Saved to every date-taken copy (EXIF original and digitized, XMP).${bad ? ' This is not a real calendar date, so Photos ignores it and shows another date instead.' : ''}` }));
   return out;
 }
 
