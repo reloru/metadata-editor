@@ -173,3 +173,12 @@ test('MOV: removing face data drops the track and blanks every face sample; vide
   assert.equal(re.technical.filter((t) => t[0].startsWith('Track')).length, 1);
   assert.ok(F.indexOf(out, v1) > 0 && F.indexOf(out, v2) > 0, 'video samples present');
 });
+
+test('MOV: repeated QuickTime keys are numbered and differing values flagged', async () => {
+  const keys = full('keys', 0, 0, u32be(2), bbox('mdta', latin1('com.apple.quicktime.creationdate')), bbox('mdta', latin1('com.apple.quicktime.creationdate')));
+  const item = (idx, s) => concat([u32be(8 + 16 + enc.encode(s).length), u32be(idx), bbox('data', new Uint8Array([0, 0, 0, 1]), new Uint8Array(4), enc.encode(s))]);
+  const meta = bbox('meta', full('hdlr', 0, 0, u32be(0), latin1('mdta'), new Uint8Array(13)), keys, bbox('ilst', item(1, '2026-11-03T15:16:00-06:00'), item(2, '2026-11-06T21:25:00Z')));
+  const doc = await open(concat([bbox('ftyp', latin1('qt  '), u32be(0), latin1('qt  ')), bbox('moov', full('mvhd', 0, 0, new Uint8Array(96)), meta), bbox('mdat', new Uint8Array(8))]));
+  assert.deepEqual(doc.sections[0].rows.map((r) => r[0]), ['creationdate (1 of 2)', 'creationdate (2 of 2)']);
+  assert.ok(doc.notes.some((n) => /2 different creationdate values/.test(n)));
+});
