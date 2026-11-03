@@ -278,3 +278,35 @@ test('JPEG: ISO 21496-1 gain map APP2 is labelled', async () => {
     F.jpegSeg(0xc0, F.concat([new Uint8Array([8]), be(8), be(8), new Uint8Array([1, 1, 0x11, 0])])), F.JPEG_SCAN]);
   assert.equal((await open(jpg)).fields.find((f) => f.key === 'APP2').label, 'Gain map info (ISO 21496-1)');
 });
+
+function gifFixture(frameBytes = 600) {
+  const blocks = (d) => { const p = []; for (let i = 0; i < d.length; i += 255) { const c = d.subarray(i, i + 255); p.push(new Uint8Array([c.length]), c); } p.push(new Uint8Array([0])); return F.concat(p); };
+  const hdr = F.concat([latin1('GIF89a'), new Uint8Array([4, 0, 4, 0, 0x80, 0, 0]), new Uint8Array(6)]);
+  const loop = F.concat([new Uint8Array([0x21, 0xff, 11]), latin1('NETSCAPE2.0'), new Uint8Array([3, 1, 0, 0, 0])]);
+  const xmp = F.concat([new Uint8Array([0x21, 0xff, 11]), latin1('XMP DataXMP'), F.enc.encode('<x:xmpmeta><rdf:Description xmp:CreatorTool="T"/></x:xmpmeta>'), new Uint8Array([1]), Uint8Array.from({ length: 256 }, (_, i) => 255 - i), new Uint8Array([0])]);
+  const comment = F.concat([new Uint8Array([0x21, 0xfe]), blocks(F.enc.encode(F.SUNO_TEXT))]);
+  const frame = () => F.concat([new Uint8Array([0x21, 0xf9, 4, 0, 10, 0, 0, 0]), new Uint8Array([0x2c, 0, 0, 0, 0, 4, 0, 4, 0, 0, 2]), blocks(F.prng(130, frameBytes))]);
+  return F.concat([hdr, loop, xmp, comment, frame(), frame(), new Uint8Array([0x3b])]);
+}
+
+test('GIF: comment, XMP, loop and frames read; comment edited and added; XMP deleted; frames byte-identical', async () => {
+  for (const size of [600, 1100000]) {
+    const before = gifFixture(size);
+    const doc = await open(before);
+    assert.equal(doc.format, 'GIF');
+    assert.equal(find(doc, 'comment').value, F.SUNO_TEXT);
+    assert.deepEqual(doc.sections[0].rows, [['xmp:CreatorTool', 'T']]);
+    assert.equal(Object.fromEntries(doc.technical).Frames, '2');
+    assert.deepEqual(await save(doc), before, 'no-op identical');
+    find(doc, 'comment').value = 'Ünï';
+    find(doc, 'XMP').deleted = true;
+    addField(doc, 'comment').value = 'two';
+    const out = await save(doc);
+    const re = await open(out);
+    assert.deepEqual(re.fields.filter((f) => f.key === 'comment').map((f) => f.value), ['Ünï', 'two']);
+    assert.equal(re.sections.length, 0);
+    const imgAt = (b) => F.indexOf(b, new Uint8Array([0x21, 0xf9, 4]));
+    assert.deepEqual(out.subarray(imgAt(out), out.length - 1).length > 0, true);
+    assert.deepEqual(before.subarray(imgAt(before)), out.subarray(out.length - (before.length - imgAt(before))), 'frames and trailer identical');
+  }
+});
