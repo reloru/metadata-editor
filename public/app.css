@@ -135,6 +135,7 @@ details summary { cursor: pointer; color: var(--accent); padding: 4px 0; }
 .field-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; min-height: 36px; }
 .field-head .label { font-weight: 600; }
 .spacer { flex: 1; }
+.field-head > .btn { margin-left: auto; }
 .chip {
   font-size: 0.72rem;
   background: var(--chip);
