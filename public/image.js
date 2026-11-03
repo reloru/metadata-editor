@@ -28,6 +28,17 @@ function startsWith(b, s, o = 0) {
   return true;
 }
 
+// Decode XML character references and the five predefined entities.
+export function xmlText(s) {
+  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|apos);/g, (m, e) => {
+    if (e[0] === '#') {
+      const n = e[1] === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    }
+    return { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }[e];
+  });
+}
+
 const XMP_SKIP = /^(xmlns|rdf|x|xml|stEvt|stRef):/;
 
 // Simple properties of an XMP packet as [name, value] rows, and whether it records a location.
@@ -35,7 +46,7 @@ export function xmpInfo(text) {
   const rows = [];
   const seen = new Set();
   const push = (k, v) => {
-    const t = v.trim();
+    const t = xmlText(v).trim();
     if (!t || XMP_SKIP.test(k) || seen.has(k) || rows.length >= 40) return;
     seen.add(k);
     rows.push([k, t.length > 200 ? t.slice(0, 200) + '…' : t]);

@@ -310,3 +310,9 @@ test('GIF: comment, XMP, loop and frames read; comment edited and added; XMP del
     assert.deepEqual(before.subarray(imgAt(before)), out.subarray(out.length - (before.length - imgAt(before))), 'frames and trailer identical');
   }
 });
+
+test('XMP values decode XML entities', async () => {
+  const { xmpInfo } = await import('../public/image.js');
+  const x = xmpInfo('<rdf:Description><dc:description><rdf:Alt><rdf:li xml:lang="x-default">Hii He l 85)&amp;:#^%}?gi &lt;3 &#x1F600;</rdf:li></rdf:Alt></dc:description></rdf:Description>');
+  assert.deepEqual(x.rows, [['dc:description', 'Hii He l 85)&:#^%}?gi <3 😀']]);
+});
