@@ -78,6 +78,7 @@ test('MOV: QuickTime keys and udta location shown; remove location keeps the oth
   const doc = await open(before);
   assert.equal(doc.format, 'MOV');
   assert.equal(find(doc, 'location').display, '+29.9367-095.0558+012.000/');
+  assert.equal(doc.sections[0].title, 'QuickTime metadata (moov/meta keys)');
   assert.deepEqual(doc.sections[0].rows, [['location.ISO6709', '+29.9367-095.0558+012.000/'], ['make', 'Apple']]);
   find(doc, 'location').deleted = true;
   const blob = await buildOutput(doc);

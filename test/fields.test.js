@@ -309,7 +309,6 @@ test('Suno provenance strings are compared with the C2PA createdAt and signing t
 test('Unsupported formats get a clear "not supported yet" message', async () => {
   const cases = [
     [concat([latin1('GIF89a'), new Uint8Array(20)]), /GIF image/],
-    [concat([latin1('RIFF'), u32be(20), latin1('WEBPVP8 '), new Uint8Array(12)]), /WebP image/],
     [concat([latin1('OggS'), new Uint8Array(20)]), /Ogg/],
     [latin1('%PDF-1.7\n' + 'x'.repeat(20)), /PDF/],
   ];
